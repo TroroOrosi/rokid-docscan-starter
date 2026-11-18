@@ -49,22 +49,27 @@ from, and the compared answers stand on the same item objects: the server saves 
 Until then nothing left this module before the slower read ended; on the phone that day one read was back minutes
 before the other was cut, and the wearer had given up. Each read that comes back logs its seconds (``codex_read_done``).
 
-A read can be made in parts (``ROKID_CODEX_PARTS``, 1: off; from 2026-11-18, unit tests and the stand-in CLI only,
-never run with the real model). One read of twelve pages with 47 questions took 515 s that day, most of it the model's
-reasoning and writing. With N each read is N requests at the same time: every one carries all the images and the whole
-request, and ``_PART_NOTE`` after it names the capture pages whose questions it answers, the other pages being
-context. The pages are shared out in order, as evenly as can be, two a part at least (``_spans``; a booklet too small
-is read in fewer parts, down to the one read as it was). A read's reply is its parts' question lists joined in that
-order (``_joined``), so everything behind the requests sees a read as before; a part that fails, or whose reply
-holds no question list, fails its read. Each part logs its seconds (``codex_part_done``); a setting that is no number
-is ignored and said (``codex_parts_setting_ignored``). What it costs: N times the images sent, 2 x N requests at once,
-and whatever the model does worse with a booklet shared out, which is not known.
+A read can be made in parts (``ROKID_CODEX_PARTS``, 1: off). One read of twelve pages with 47 questions took 515 s on
+2026-11-18, most of it the model's reasoning and writing. With N over 1 and four pages or more, a small request beside
+the one that locates the pages asks on which captures the booklet's major problems begin (``_outline``; from 1024-px
+views at low effort it named the same captures twice over for four booklets of that day's use, those the full reads'
+question lists begin on). The first read is then one request for each of at most N groups of major problems, at the
+same time (``_section_spans``): each carries its own captures at full size, the capture the next group begins on
+included, and every other capture as its small overview at most; ``_PART_NOTE`` after the whole request names the
+captures whose major problems it answers. The second read is whole, as ever: it is what the first is compared with,
+and it answers what a part could not for want of a page. A read's reply is its parts' question lists joined in order
+(``_joined``), so everything behind the requests sees a read as before; a part that fails, or whose reply holds no
+question list, fails its read. A booklet whose major problems are not told is read whole twice. Each part logs its
+seconds (``codex_part_done``), the outline what it gave (``codex_outline``, numbers only); a setting that is no number
+is ignored and said (``codex_parts_setting_ignored``). Until the night of 2026-11-18 every part of both reads carried
+every image, shared out by page count: six times one whole read's bytes for twelve pages in three parts, tried on
+Wi-Fi only, where the venue has the mobile network (M-44 (19)).
 
 The CLI takes images only. A booklet with audio (listening, mixed English) is refused before anything runs, with the
 error the server answers by handing the booklet to the next route.
 
 Settings: ``ROKID_CODEX_BIN`` (default: the Termux npm install, else ``codex`` on PATH), ``ROKID_CODEX_MODEL``
-(``gpt-6.2-sol``), ``ROKID_CODEX_EFFORT`` (``high``), ``ROKID_CODEX_TIMEOUT_S`` (by the booklet's size, see ``_time_allowed``), ``ROKID_CODEX_LOCATE`` (``1``;
+(not set: the newest Sol the CLI's own model list offers, ``gpt-6.2-sol`` at least, see ``_model``), ``ROKID_CODEX_EFFORT`` (``high``), ``ROKID_CODEX_TIMEOUT_S`` (by the booklet's size, see ``_time_allowed``), ``ROKID_CODEX_LOCATE`` (``1``;
 ``0`` sends photos as the Chat route does), ``ROKID_CODEX_PAGE_SCALE`` (2: a region cut from a still photo is sent at
 this many times its own pixels at least), ``ROKID_CODEX_PAGE_LONG`` (2540 px: the long side a smaller region is
 enlarged up to, at most two and a half times; a page recorded as a clip follows this alone, see ``_wanted_scale``),
@@ -84,6 +89,7 @@ from __future__ import annotations
 import concurrent.futures
 import contextlib
 import hashlib
+import itertools
 import json
 import math
 import os
@@ -100,7 +106,7 @@ import traceback
 import unicodedata
 from pathlib import Path
 
-from .. import config
+from .. import codex_update, config
 from ..llm import extract_json
 from PIL import Image
 
@@ -152,6 +158,18 @@ _REGION = {"type": "object", "additionalProperties": False, "required": ["left",
 _LOCATE_SCHEMA = {"type": "object", "additionalProperties": False, "required": ["images"], "properties": {"images": {
     "type": "array", "items": {"type": "object", "additionalProperties": False, "required": ["index", "regions"],
                                "properties": {"index": _INTEGER, "regions": {"type": "array", "items": _REGION}}}}}}
+# Where the major problems begin, for a read in parts. Its own request, so that nothing about finding the pages
+# changes: the views are the ones that request gets, under names of their own.
+_OUTLINE_PROMPT = (
+    "Each attached image is one capture of an exam, taken through smart glasses, in capture order (captureNNN.jpg is "
+    "capture page NNN). An exam is made of major problems: its top-level numbered problems, each with its own passage, "
+    "data or instructions and its own questions. Return starts: the capture page numbers on which a major problem "
+    "begins, in ascending order. The first capture that shows exam matter is a start. A major problem may begin "
+    "partway down a capture whose top still belongs to the one before: list that capture. Sub-questions inside a "
+    "major problem are not starts. If you cannot tell where major problems begin, return an empty list. Do not run "
+    "commands or use tools; look at the images and reply once.")
+_OUTLINE_SCHEMA = {"type": "object", "additionalProperties": False, "required": ["starts"],
+                   "properties": {"starts": {"type": "array", "items": _INTEGER}}}
 _REGION_MARGIN = 0.03  # of the region's own size on each side: the boxes sat on the sheet's edge, sometimes just inside
 # ... and at least this share of the photo's side (15 to 20 px of 4032x3024). 3% of a strip one line high is under a
 # pixel, and a box comes in thousandths read off a view where one pixel is four of the photo's.
@@ -167,7 +185,59 @@ _REGIONS_MOST = 8  # of one photo; past it the first are cut out and the photo a
 # GPT-6.2 Sol since 2026-11-18: released the day before for Codex and Work; the operator's decision, without a
 # comparison. The CLI has to be 0.170.0 or newer to know it (0.169.0 lists gpt-6.1-sol as its newest Sol).
 MODEL = "gpt-6.2-sol"
-_CONTEXT_TOKENS = 475_000  # 95% of the 500,000 the CLI's own model list gives gpt-6.2-sol, as it gave gpt-6.1-sol
+_MODEL_WINDOW = 500_000    # the context the CLI's own model list gives gpt-6.2-sol, as it gave gpt-6.1-sol
+_CONTEXT_TOKENS = 475_000  # 95% of it
+_SOL = re.compile(r"gpt-(\d+(?:\.\d+)*)-sol")
+
+
+def _model() -> str:
+    """The model a booklet is read with: ``ROKID_CODEX_MODEL`` when the operator names one; else the newest Sol the
+    CLI's own model list offers, and ``MODEL`` when that list holds nothing newer.
+
+    The operator, 2026-11-18: tools and models are to be kept at the latest. GPT-6.2 Sol had been out a day before
+    anyone here looked, and the name was this constant. The CLI keeps the list the service offers its version in
+    ``models_cache.json`` (fetched again by a run when it is older than five minutes, and keyed to the client's
+    version: an old CLI is not told of a new model; codex-rs models-manager at rust-v0.170.0). Followed: a slug
+    ``gpt-<number>-sol`` of a higher number than ``MODEL``'s that is shown (``visibility`` ``list``) and has at least
+    the context a booklet is sized for here. Anything else about a newer model (how it reads this system's pages,
+    how long it takes) is not known when it is first used; a model the service then refuses is not used
+    (``_with_model``).
+    """
+    named = os.environ.get("ROKID_CODEX_MODEL")
+    if named:
+        return named
+
+    def number(slug) -> tuple[int, ...] | None:
+        sol = _SOL.fullmatch(slug) if isinstance(slug, str) else None
+        return tuple(int(part) for part in sol[1].split(".")) if sol else None
+
+    newest, model = number(MODEL), MODEL
+    try:
+        home = Path(os.environ.get("CODEX_HOME") or Path.home() / ".codex")
+        for entry in json.loads((home / "models_cache.json").read_text(encoding="utf-8"))["models"]:
+            found, window = number(entry.get("slug")), entry.get("context_window")
+            if (found and found > newest and entry.get("visibility") == "list"
+                    and type(window) is int and window >= _MODEL_WINDOW):
+                newest, model = found, entry["slug"]
+    except (OSError, ValueError, KeyError, TypeError, AttributeError):
+        pass
+    return model
+
+
+def _with_model(run):
+    """``run(model)`` with the model a booklet is read with. A model newer than ``MODEL`` that the service refuses
+    gives way to ``MODEL`` once: a model that is not offered would hand the booklet to Work and Chat, neither of
+    which answered a booklet inside a test's time on 2026-11-18. A model the operator named is never replaced."""
+    model = _model()
+    if model != MODEL:
+        print(json.dumps({"event": "codex_model", "model": model, "built_on": MODEL}), flush=True)
+    try:
+        return run(model)
+    except ChatGptWebModelMismatch:
+        if model == MODEL or os.environ.get("ROKID_CODEX_MODEL"):
+            raise
+        print(json.dumps({"event": "codex_model_refused", "model": model}), flush=True)
+        return run(MODEL)
 _FIXED_TOKENS = 115_000    # the CLI's own 15,000 (14,650 with no image) and 100,000 kept for reasoning and the reply
 _TOKENS_PER_PATCH = 1.21   # an image's cost per 32-px patch, in proportion from 512x512 to 3000x3000
 
@@ -517,8 +587,20 @@ def _regions(reply: str, photos: int) -> tuple[dict[int, list[tuple[float, float
 # hit your usage limit. Visit ... to purchase more credits or try again at 10:16 AM.", phone, 2026-11-16, M-34; in the
 # binary of codex 0.167.0 with a typographic apostrophe and, after the first sentence, an upgrade, a visit or another
 # model to switch to), or the service's words on a line that begins as an error.
-_LIMIT = re.compile(r"(?:hit|reached) your usage limit|^\W*(?:\w+ )?error\b.*?(?:usage limit|rate limit|quota)",
+_LIMIT = re.compile(r"(?:hit|reached) your usage limit"
+                    r"|^\W*(?:\w+ )?error\b.*?(?:usage limit|quota|out of credits|hit your spend cap)",
                     re.IGNORECASE | re.DOTALL)  # an event's message may be more than one line
+# A request refused for its rate, which is not the allowance (codex-rs at rust-v0.170.0, read 2026-11-18): an HTTP
+# 429 of another kind ("exceeded retry limit, last status: 429 Too Many Requests", which the CLI sends again only when
+# the service names a wait), a rate limit inside the stream ("rate limit exceeded: ...", sent again five times in
+# about six seconds) and "Selected model is at capacity." Until 2026-11-18 the words "rate limit" were a usage limit:
+# the booklet left the CLI and Work for Chat, which that evening did not answer a booklet in an hour.
+_RATE = re.compile(r"^\W*(?:\w+ )?error\b.*?(?:last status: 429|rate limit|too many requests|at capacity)",
+                   re.IGNORECASE | re.DOTALL)
+# How long after such a refusal the same request goes again, each time. What the service does with several requests
+# of one account at once is not documented and was not met in four runs of six: these are a guess to be corrected
+# from the log (``codex_rate_refused``). After the last, the request fails as a send that did not happen.
+_RATE_WAITS = (5.0, 20.0)
 # The CLI's own sentence alone. No page says it, so it is taken anywhere on stderr: how many lines the CLI writes
 # after it at a real limit is not on record, and a limit not recognised sends the booklet to Work, which draws on the
 # same allowance, before Chat.
@@ -526,6 +608,29 @@ _OWN_LIMIT = re.compile(r"(?:hit|reached) your usage limit", re.IGNORECASE)
 # Of stderr, from its end: the error and, after it, what the CLI says of the reply it could not write ("Warning: no
 # last agent message; wrote empty content to ...", its binary's words) and of the tokens used. Not measured at a limit.
 _LIMIT_LINES = 8
+
+
+def _said(stdout: str, stderr: str) -> list[str]:
+    """What the CLI says of its own failure: the last lines of stderr and, when its events are on stdout as lines
+    of JSON (``--json``, which the requests here do not ask for), the message of an ``error`` or ``turn.failed``
+    event as an error line."""
+    said = [re.sub(r"\x1b\[[0-9;]*m", "", line).strip() for line in stderr.splitlines() if line.strip()][-_LIMIT_LINES:]
+    for line in stdout.splitlines():
+        try:
+            event = json.loads(line)
+            kind = event["type"]
+        except (ValueError, KeyError, TypeError):
+            continue
+        if kind in ("error", "turn.failed"):
+            detail = event.get("error") if kind == "turn.failed" else event
+            said.append(f"error: {detail.get('message') if isinstance(detail, dict) else detail}")
+    return said
+
+
+def _rate_reported(stdout: str, stderr: str) -> bool:
+    """Whether a run that failed says the service refused it for the rate of requests (``_RATE``). Asked only of a
+    run that did not report a usage limit."""
+    return any(_RATE.search(line) for line in _said(stdout, stderr))
 
 
 def _limit_reported(stdout: str, stderr: str) -> bool:
@@ -538,19 +643,7 @@ def _limit_reported(stdout: str, stderr: str) -> bool:
     events are on stdout as lines of JSON (``--json``, which the requests here do not ask for), the message of an
     ``error`` or ``turn.failed`` event. How the limit reads on stderr without ``--json`` is not on record.
     """
-    if _OWN_LIMIT.search(stderr):
-        return True
-    said = [re.sub(r"\x1b\[[0-9;]*m", "", line).strip() for line in stderr.splitlines() if line.strip()][-_LIMIT_LINES:]
-    for line in stdout.splitlines():
-        try:
-            event = json.loads(line)
-            kind = event["type"]
-        except (ValueError, KeyError, TypeError):
-            continue
-        if kind in ("error", "turn.failed"):
-            detail = event.get("error") if kind == "turn.failed" else event
-            said.append(f"error: {detail.get('message') if isinstance(detail, dict) else detail}")
-    return any(_LIMIT.search(line) for line in said)
+    return bool(_OWN_LIMIT.search(stderr)) or any(_LIMIT.search(line) for line in _said(stdout, stderr))
 
 
 # A run that ended because the service no longer offers the model. The CLI warns "Model metadata for `<model>` not
@@ -597,33 +690,61 @@ _SECOND_READ_LEAST_S = 120.0
 # and a read cut is a booklet nothing was compared for.
 _SECOND_READ_MOST_S = 900.0
 
-# What one part of a read is told after the whole request (ROKID_CODEX_PARTS). The request above it still says to
-# answer every question, so this says first that it narrows that. A question belongs where its own text begins, and
-# where captures overlap to the first that shows that beginning: the parts cannot see each other's lists. Never run
-# with the real model: whether it keeps to its pages, and whether it still reads a passage on another part's pages,
-# is what a trial has to show.
+# What one part of the first read is told after the whole request (ROKID_CODEX_PARTS). The request above it still
+# says to answer every question, so this says first that it narrows that. A part owns the major problems that begin
+# on its captures: the capture the next part begins on is sent to both, and each lists only what is its own.
 _PART_NOTE = (
-    "\n\nThis request is one of {parts} sent at the same time with the same images; each covers its own capture "
-    "pages and the others answer the rest, so here the instruction to answer every question holds for capture pages "
-    "{first} to {last} only. Answer only the questions whose own text begins on capture pages {first} to {last}; a "
-    "question that more than one capture shows begins on the lowest-numbered capture page that shows its beginning. "
-    "Every other capture page is context for them (passages, figures, tables, instructions): read it, list nothing "
-    "from it. Report what the captures leave out only for capture pages {first} to {last}; a gap in the printed "
-    "page numbers is reported with the capture page before the gap, or with the one after it when none is before. "
-    "If no question begins on capture pages {first} to {last} and nothing is to be reported for them, reply "
+    "\n\nThis request is one of {parts} sent at the same time, each for some of the booklet's major problems (its "
+    "top-level numbered problems); here the instruction to answer every question holds for the major problems that "
+    "begin on capture pages {first} to {own_last} only. A major problem that more than one capture shows begins on "
+    "the lowest-numbered capture page that shows its beginning. Their captures are attached at full size: capture "
+    "pages {first} to {last}. Every other capture page is attached as its small overview at most, and another "
+    "request answers what begins there: list nothing of a major problem that begins before capture page {first} or "
+    "after capture page {own_last}, even where a full-size image shows part of it. If a question of yours cannot be "
+    "answered without reading a capture page that is not attached at full size here, give it the status needs_input "
+    "and name those capture pages in missing_material; never read text from an overview. Report what the captures "
+    "leave out only for capture pages {first} to {own_last}; a gap in the printed page numbers is reported with the "
+    "capture page before the gap, or with the one after it when none is before. If no major problem begins on "
+    "capture pages {first} to {own_last} and nothing is to be reported for them, reply "
     '{{"questions":[]}}.')
+_PARTS_MOST = 4  # of one read, whatever is set: every way of grouping the major problems is tried
+_PAGE_FILE = re.compile(r"page(\d{3})")
 
 
-def _spans(numbers: list[int], parts: int) -> list[tuple[int, int]]:
-    """The capture pages of each part of a read, as (first, last): in order, every page once, as even as can be, and
-    two pages a part at least. A booklet too small for ``parts`` gets as many as fit; one span is the read as it was.
+def _section_spans(numbers: list[int], starts, parts: int) -> list[tuple[int, int, int]]:
+    """The parts of a read by the booklet's major problems, each (first capture page, last capture page whose major
+    problems it answers, last capture page it is sent at full size); empty when there are not to be parts.
 
-    ``numbers`` are the booklet's capture page numbers in order; a number the booklet does not have is in no span.
+    ``numbers`` are the booklet's capture page numbers in order, ``starts`` what the model returned as the captures
+    on which major problems begin; the first capture is one whatever it said. A major problem runs from its start
+    to the next start, on which it may end partway down: that capture is sent with both. More major problems than
+    ``parts``: neighbours share a part, so that the most captures any part answers for are as few as can be, then
+    the next most; of equal ways, the one that cuts earliest. Fewer than two starts, or one part asked for: no
+    parts. Captures shared out by their count alone would part a passage from its questions.
     """
-    parts = max(1, min(parts, len(numbers) // 2))
-    size, more = divmod(len(numbers), parts)
-    starts = [index * size + min(index, more) for index in range(parts + 1)]
-    return [(numbers[start], numbers[end - 1]) for start, end in zip(starts, starts[1:])]
+    if not numbers or not isinstance(starts, list):
+        return []
+    begins = sorted({numbers[0], *(start for start in starts if type(start) is int and start in numbers)})
+    count = min(parts, len(begins), _PARTS_MOST)
+    if count < 2:
+        return []
+    at = [*(numbers.index(start) for start in begins), len(numbers)]
+
+    def groups(cuts: tuple[int, ...]):
+        return zip((0, *cuts), (*cuts, len(begins)))
+
+    # ponytail: every way of cutting is tried (forty captures in four parts are 9,139 ways); a search when
+    # _PARTS_MOST has to grow.
+    cuts = min(itertools.combinations(range(1, len(begins)), count - 1),
+               key=lambda cuts: (sorted((at[end] - at[start] for start, end in groups(cuts)), reverse=True), cuts))
+    return [(begins[start], numbers[at[end] - 1], numbers[min(at[end], len(numbers) - 1)]) for start, end in groups(cuts)]
+
+
+def _attached(name: str, first: int, last: int) -> bool:
+    """Whether a part that is sent capture pages ``first`` to ``last`` at full size is sent this image: every
+    overview, and the files of its own captures (pageNNN..., whatever follows the number)."""
+    numbered = _PAGE_FILE.match(name)
+    return numbered is None or first <= int(numbered[1]) <= last
 
 
 def _decisive(failures: list) -> BaseException:
@@ -698,6 +819,9 @@ def _command() -> list[str]:
     named = os.environ.get("ROKID_CODEX_BIN", "")
     if named:
         return [named] if Path(named).is_file() else []
+    updated = codex_update.chosen()  # a newer release that was installed beside and answered (app/codex_update.py)
+    if updated:
+        return [updated]
     termux = Path(os.environ.get("PREFIX", "")) / _TERMUX_BINARY
     if os.environ.get("PREFIX") and termux.is_file():
         return [str(termux)]
@@ -736,22 +860,35 @@ class _Tunnel(socketserver.BaseRequestHandler):
             with contextlib.suppress(OSError):
                 client.sendall(b"HTTP/1.1 502 Bad Gateway\r\n\r\n")
             return
-        with upstream:
-            client.sendall(b"HTTP/1.1 200 Connection Established\r\n\r\n")
-            client.settimeout(None)
-            sockets = [client, upstream]
-            while True:
-                readable, _, _ = select.select(sockets, [], [], self.server.idle_s)
-                if not readable:
-                    return
-                for source in readable:
-                    try:
-                        data = source.recv(65536)
-                        if not data:
-                            return
-                        (upstream if source is client else client).sendall(data)
-                    except OSError:
+        sent, busy, last = 0, 0.0, None
+        try:
+            with upstream:
+                client.sendall(b"HTTP/1.1 200 Connection Established\r\n\r\n")
+                client.settimeout(None)
+                sockets = [client, upstream]
+                while True:
+                    readable, _, _ = select.select(sockets, [], [], self.server.idle_s)
+                    if not readable:
                         return
+                    for source in readable:
+                        try:
+                            data = source.recv(65536)
+                            if not data:
+                                return
+                            (upstream if source is client else client).sendall(data)
+                        except OSError:
+                            return
+                        if source is client:
+                            # The time between pieces that follow one another at once is the time the network took
+                            # to carry them (a full send waits); a longer silence is the request being thought about.
+                            now = time.monotonic()
+                            busy += now - last if last is not None and now - last < 1.0 else 0.0
+                            sent, last = sent + len(data), now
+        finally:
+            if sent >= 1_000_000:
+                # What a request uploaded and how fast, so that the venue's network is on record: bytes, never content.
+                print(json.dumps({"event": "codex_upload", "mb": round(sent / 1e6, 1), "seconds": round(busy, 1),
+                                  "mbit_s": round(sent * 8 / 1e6 / busy, 1) if busy > 0 else None}), flush=True)
 
 
 class _Proxy(socketserver.ThreadingTCPServer):
@@ -798,8 +935,8 @@ class CodexCliSolver(Solver):
     accepts_images = True
 
     @staticmethod
-    def _signed_in() -> bool:
-        command = _command()
+    def _signed_in(command: list[str] | None = None) -> bool:
+        command = command or _command()
         if not command:
             return False
         try:
@@ -827,8 +964,7 @@ class CodexCliSolver(Solver):
             raise ChatGptWebError("codex-cli takes images only; this booklet needs audio")
         if not question.document_pages:
             raise ValueError("answering the booklet needs the original pages")
-        model = os.environ.get("ROKID_CODEX_MODEL") or MODEL
-        extras = {"source": self.name, "provider": "codex", "model": model}
+        extras = {"source": self.name, "provider": "codex", "model": _model()}
         kept = self._kept(question)
         if kept is not None and kept.is_file():
             try:
@@ -852,8 +988,12 @@ class CodexCliSolver(Solver):
             question.on_first_read(self._answers([data], question, extras))
             handed.append(data)
 
+        def run(model: str) -> list[str]:
+            extras["model"] = model  # the one that answers, whichever was tried first
+            return self._run(question, model, hand_over if question.on_first_read else None)
+
         try:
-            texts = self._run(question, model, hand_over if question.on_first_read else None)
+            texts = _with_model(run)
         except (OSError, MemoryError, ValueError) as error:
             _log_cause("codex_run_failed", error)
             raise ChatGptWebReplyIncomplete("the Codex CLI's run could not be carried out on this host") from error
@@ -901,8 +1041,9 @@ class CodexCliSolver(Solver):
     @staticmethod
     def _exec(directory: Path, environment: dict, *, model: str, effort: str, images: list[str], prompt: str,
               timeout: float, schema: dict | None = None, reply_name: str = "reply.json",
-              ephemeral: bool = True, running: list | None = None) -> str:
-        """Run the CLI once in ``directory`` on the image files named there; its reply text.
+              ephemeral: bool = True, running: list | None = None, cli: list[str] | None = None) -> str:
+        """Run the CLI (``cli``: another binary than the one in use, to try it) once in ``directory`` on the image
+        files named there; its reply text.
 
         The process is added to ``running`` for the caller to end from another thread; a run ended that way fails
         here as any run that ends without a reply."""
@@ -911,7 +1052,7 @@ class CodexCliSolver(Solver):
         # Fast unless a trial says standard (the operator, 2026-11-16 and 11/10). `priority` is the CLI's Fast tier;
         # `default` asks for standard routing even where a model's own default is Fast.
         tier = "default" if (os.environ.get("ROKID_CODEX_SPEED") or "").strip().lower() == "standard" else "priority"
-        command = [*_command(), "exec", "-m", model, "-c", f"model_reasoning_effort={effort}",
+        command = [*(cli or _command()), "exec", "-m", model, "-c", f"model_reasoning_effort={effort}",
                    "-c", f"service_tier={tier}", "-s", "read-only",
                    "--skip-git-repo-check", *(["--ephemeral"] if ephemeral else []),
                    *(part for name in images for part in ("-i", name))]
@@ -919,36 +1060,47 @@ class CodexCliSolver(Solver):
             (directory / "schema.json").write_text(json.dumps(schema), encoding="utf-8")
             command += ["--output-schema", "schema.json"]
         command += ["-o", str(reply), prompt]
-        try:
-            process = subprocess.Popen(command, cwd=directory, env=environment, stdout=subprocess.PIPE,
-                                       stderr=subprocess.PIPE, text=True, encoding="utf-8", errors="replace",
-                                       stdin=subprocess.DEVNULL)
-        except OSError as error:
-            raise ChatGptWebError(f"the Codex CLI could not start: {type(error).__name__}") from error
-        if running is not None:
-            running.append(process)
-        with process:  # as subprocess.run does it, which gives no hold on the process
+        for again_in in (*_RATE_WAITS, None):
             try:
-                stdout, stderr = process.communicate(timeout=timeout)
-            except subprocess.TimeoutExpired as error:
-                process.kill()
-                if os.name == "nt":
-                    process.communicate()  # Windows reads the pipes on threads of its own: let them end
-                raise ChatGptWebReplyIncomplete("the Codex CLI did not finish in time") from error
-            except BaseException:
-                process.kill()  # nothing is left running behind another error either
-                raise
-        output = stdout + "\n" + stderr
-        if process.returncode != 0 or not reply.is_file():
+                process = subprocess.Popen(command, cwd=directory, env=environment, stdout=subprocess.PIPE,
+                                           stderr=subprocess.PIPE, text=True, encoding="utf-8", errors="replace",
+                                           stdin=subprocess.DEVNULL)
+            except OSError as error:
+                raise ChatGptWebError(f"the Codex CLI could not start: {type(error).__name__}") from error
+            if running is not None:
+                running.append(process)
+            with process:  # as subprocess.run does it, which gives no hold on the process
+                try:
+                    stdout, stderr = process.communicate(timeout=timeout)
+                except subprocess.TimeoutExpired as error:
+                    process.kill()
+                    if os.name == "nt":
+                        process.communicate()  # Windows reads the pipes on threads of its own: let them end
+                    raise ChatGptWebReplyIncomplete("the Codex CLI did not finish in time") from error
+                except BaseException:
+                    process.kill()  # nothing is left running behind another error either
+                    raise
+            if process.returncode == 0 and reply.is_file():
+                # The CLI's own last word on a run ("tokens used" and a number): what this request cost, on record.
+                used = re.findall(r"tokens used\s*:?\s*([\d,]+)", stdout + "\n" + stderr)
+                if used:
+                    print(json.dumps({"event": "codex_tokens", "tokens": int(used[-1].replace(",", "")),
+                                      "images": len(images)}), flush=True)
+                return reply.read_text(encoding="utf-8")
             if _limit_reported(stdout, stderr):
                 raise ChatGptWebRateLimit("the Codex CLI reported a usage limit")
-            if _NO_MODEL.search(output):
+            if _NO_MODEL.search(stdout + "\n" + stderr):
                 # Named, so the check before use says why and the booklet goes to the next route. No other model
                 # is tried: which one answers a booklet is the operator's choice (ROKID_CODEX_MODEL).
                 raise ChatGptWebModelMismatch("the Codex CLI's model is not offered; nothing answered")
-            # The CLI's own last line is the only record of why; it names no page content.
-            raise ChatGptWebError(f"the Codex CLI ended without a reply: {_last_line(stderr) or _last_line(stdout)}")
-        return reply.read_text(encoding="utf-8")
+            if again_in is None or not _rate_reported(stdout, stderr):
+                break
+            # Refused for the rate of requests, not for the allowance: the same request once more after a wait.
+            print(json.dumps({"event": "codex_rate_refused", "again_in_s": again_in}), flush=True)
+            time.sleep(again_in)
+            reply.unlink(missing_ok=True)
+        # The CLI's own last line is the only record of why; it names no page content.
+        raise ChatGptWebError(f"the Codex CLI ended without a reply: {_last_line(stderr) or _last_line(stdout)}")
 
     @classmethod
     def _located(cls, directory: Path, environment: dict, pages: list[dict], *, model: str, timeout: float) -> list[str] | None:
@@ -1023,6 +1175,36 @@ class CodexCliSolver(Solver):
                 names.append(f"page{label}.jpg")
         return names
 
+    @classmethod
+    def _outline(cls, directory: Path, environment: dict, pages: list[dict], *, model: str, timeout: float,
+                 parts: int, running: list) -> list[tuple[int, int, int]]:
+        """The parts the first read is to be made in (``_section_spans``); empty for a whole read.
+
+        One request at low effort with a small view of every capture, in a folder of its own beside the request
+        that locates the pages. Whatever goes wrong here leaves the booklet to the whole reads, which say for
+        themselves what is wrong with the route; only the kind of failure is logged."""
+        began, starts = time.monotonic(), None
+        ordered = sorted(pages, key=lambda page: page["page_number"])
+        try:
+            directory.mkdir()
+            views = []
+            for page in ordered:
+                with Image.open(page["image_path"]) as source:
+                    view = _readable(source.convert("RGB"))
+                view.thumbnail((1024, 1024))
+                views.append(f"capture{page['page_number']:03d}.jpg")
+                view.save(directory / views[-1], quality=85)
+            reply = cls._exec(directory, environment, model=model, effort="low", images=views, prompt=_OUTLINE_PROMPT,
+                              timeout=min(timeout, 900), schema=_OUTLINE_SCHEMA, running=running)
+            starts = extract_json(reply)["starts"]
+        except (ChatGptWebError, OSError, MemoryError, ValueError, KeyError, TypeError) as error:
+            _log_cause("codex_outline_failed", error)
+        spans = _section_spans([page["page_number"] for page in ordered], starts, parts)
+        print(json.dumps({"event": "codex_outline", "parts": len(spans), "seconds": round(time.monotonic() - began, 1),
+                          "starts": len({start for start in starts if type(start) is int}) if isinstance(starts, list) else 0}),
+              flush=True)
+        return spans
+
     @staticmethod
     @contextlib.contextmanager
     def _workplace(timeout: float = 600.0):
@@ -1041,7 +1223,10 @@ class CodexCliSolver(Solver):
 
     @staticmethod
     def _usage(environment: dict, since: float) -> dict | None:
-        """The allowance used, from the session record a request made after ``since`` left; None when it says nothing."""
+        """The allowance used, from the session record a request made after ``since`` left; None when it says nothing.
+
+        Of the windows the service names (a week; on some plans five hours as well, and allowance has to remain in
+        both), the one nearer its limit: that is the one that stops a booklet."""
         home = Path(environment.get("CODEX_HOME") or Path.home() / ".codex")
         try:
             records = [path for path in (home / "sessions").rglob("rollout-*.jsonl") if path.stat().st_mtime >= since]
@@ -1050,13 +1235,18 @@ class CodexCliSolver(Solver):
         except OSError:
             return None
         found = None
+        def used(window) -> float:
+            share = window.get("used_percent") if isinstance(window, dict) else None
+            return share if isinstance(share, (int, float)) and not isinstance(share, bool) else -1.0
+
         for line in lines:
             try:
-                limits = json.loads(line)["payload"]["rate_limits"]["primary"]
-            except (ValueError, KeyError, TypeError):
+                limits = json.loads(line)["payload"]["rate_limits"]
+                nearest = max((limits.get("primary"), limits.get("secondary")), key=used)
+            except (ValueError, KeyError, TypeError, AttributeError):
                 continue
-            if isinstance(limits, dict):
-                found = limits
+            if used(nearest) >= 0:
+                found = nearest
         numbers = {key: found[key] for key in ("used_percent", "window_minutes", "resets_at")
                    if found and isinstance(found.get(key), (int, float)) and not isinstance(found.get(key), bool)}
         return numbers if "used_percent" in numbers else None
@@ -1070,14 +1260,40 @@ class CodexCliSolver(Solver):
         with self._workplace() as (directory, environment):
             (directory / "canary.jpg").write_bytes(picture)
             asked = time.time() - 2  # a file's time is coarser than the clock on some hosts
-            reply = self._exec(directory, environment, model=os.environ.get("ROKID_CODEX_MODEL") or MODEL,
-                               effort="low", images=["canary.jpg"], timeout=120, ephemeral=False,
-                               prompt="How many black squares are in the attached image? Do not run commands or use "
-                                      "tools. Reply with the number only.")
+            reply = _with_model(lambda model: self._exec(
+                directory, environment, model=model, effort="low", images=["canary.jpg"], timeout=120, ephemeral=False,
+                prompt="How many black squares are in the attached image? Do not run commands or use tools. Reply "
+                       "with the number only."))
             usage = self._usage(environment, asked)
         if re.sub(r"\D", "", reply) != str(squares):
             raise ChatGptWebCheckFailed("the check's reply was not the count the picture shows")
         return {"usage": usage} if usage else None
+
+    @classmethod
+    def verify(cls, cli: list[str]) -> None:
+        """Raises unless this CLI is signed in and answers one request made with every flag a booklet's requests
+        use: a model, the effort and the tier, the sandbox, an image, a reply schema, a reply file, no session
+        kept. What a newly installed release is tried with before the route runs it (app/codex_update.py); how it
+        reads this system's pages is not what this shows."""
+        if not chatgpt_send_enabled():
+            raise ChatGptWebSendNotAuthorized("sending is not authorized")
+        if not cls._signed_in(cli):
+            raise ChatGptWebAuthenticationRequired("the Codex CLI to be tried is not signed in; nothing sent")
+        squares, picture = check_picture()
+        schema = {"type": "object", "additionalProperties": False, "required": ["squares"],
+                  "properties": {"squares": _INTEGER}}
+        with cls._workplace() as (directory, environment):
+            (directory / "canary.jpg").write_bytes(picture)
+            reply = _with_model(lambda model: cls._exec(
+                directory, environment, cli=cli, model=model, effort="low", images=["canary.jpg"], timeout=120,
+                schema=schema, prompt="How many black squares are in the attached image? Do not run commands or use "
+                                      "tools; look at the image and reply once."))
+        try:
+            counted = extract_json(reply)["squares"]
+        except (ValueError, KeyError, TypeError):
+            counted = None
+        if counted != squares:
+            raise ChatGptWebCheckFailed("the reply of the CLI to be tried was not the count the picture shows")
 
     @staticmethod
     def _usable(read: concurrent.futures.Future, question: Question) -> bool:
@@ -1106,8 +1322,17 @@ class CodexCliSolver(Solver):
             # to the routes behind this one for the sake of an option.
             parts = 1
             print(json.dumps({"event": "codex_parts_setting_ignored"}), flush=True)
-        spans = _spans(sorted(page["page_number"] for page in question.document_pages), parts)
-        with cls._workplace(timeout) as (directory, environment):
+        beside = concurrent.futures.ThreadPoolExecutor(max_workers=1)
+        running: list = []
+        with cls._workplace(timeout) as (directory, environment), contextlib.ExitStack() as leaving:
+            # Whatever ends this call ends what it started: a request left running would hold the folder, and the
+            # thread beside would hold the call until that request's own time ran out.
+            leaving.callback(beside.shutdown)
+            leaving.callback(lambda: [process.kill() for process in running])  # nothing happens to one that has ended
+            outline = None
+            if parts > 1 and len(question.document_pages) >= 4:
+                outline = beside.submit(cls._outline, directory / "outline", environment, question.document_pages,
+                                        model=model, timeout=locating, parts=parts, running=running)
             names = None
             if (os.environ.get("ROKID_CODEX_LOCATE") or "1") != "0":
                 names = cls._located(directory, environment, question.document_pages, model=model, timeout=locating)
@@ -1119,20 +1344,22 @@ class CodexCliSolver(Solver):
                     names.append(payload["name"])
             request = {"model": model, "effort": effort, "images": names, "timeout": timeout,
                        "prompt": _ANSWER_ONLY_SYSTEM + "\n\n" + grey_note(question.document_pages) + _ALL_TASK + note}
-            began, running = time.monotonic(), []
+            began = time.monotonic()
 
-            def part(number: int, index: int, first: int, last: int) -> str:
+            def part(number: int, index: int, count: int, first: int, own_last: int, last: int) -> str:
                 reply = cls._exec(directory, environment, reply_name=f"reply-{number}-{index}.json", running=running,
-                                  **{**request, "prompt": request["prompt"] + _PART_NOTE.format(
-                                      parts=len(spans), first=first, last=last)})
-                print(json.dumps({"event": "codex_part_done", "read": number, "part": index, "pages": f"{first}-{last}",
-                                  "seconds": round(time.monotonic() - began, 1)}), flush=True)
+                                  **{**request, "images": [name for name in names if _attached(name, first, last)],
+                                     "prompt": request["prompt"] + _PART_NOTE.format(
+                                         parts=count, first=first, own_last=own_last, last=last)})
+                print(json.dumps({"event": "codex_part_done", "read": number, "part": index,
+                                  "pages": f"{first}-{own_last}", "seconds": round(time.monotonic() - began, 1)}),
+                      flush=True)
                 return reply
 
-            def in_parts(number: int) -> str:
+            def in_parts(number: int, spans: list[tuple[int, int, int]]) -> str:
                 """One read as a request for each span, all at once; every one has to come back for the read to."""
                 with concurrent.futures.ThreadPoolExecutor(max_workers=len(spans)) as pool:
-                    asked = [pool.submit(part, number, index, *span) for index, span in enumerate(spans, 1)]
+                    asked = [pool.submit(part, number, index, len(spans), *span) for index, span in enumerate(spans, 1)]
                 texts, failures = [], []
                 for one in asked:
                     try:
@@ -1143,11 +1370,22 @@ class CodexCliSolver(Solver):
                 # them (a list of processes for each read) once a trial shows requests wasted that way.
                 if failures:
                     raise _decisive(failures)
-                return _joined(number, spans, texts)
+                return _joined(number, [(first, own_last) for first, own_last, _ in spans], texts)
+
+            def shared() -> list[tuple[int, int, int]]:
+                """The parts of the first read, once the request beside has said; none when it could not."""
+                try:
+                    return outline.result() if outline is not None else []
+                except Exception as error:  # noqa: BLE001 - the outline is a speed-up: its trouble costs no read
+                    _log_cause("codex_outline_failed", error)
+                    return []
 
             def read(number: int, reply_name: str) -> str:
-                reply = (cls._exec(directory, environment, reply_name=reply_name, running=running, **request)
-                         if len(spans) == 1 else in_parts(number))
+                # The first read in parts where the major problems are told; the second whole, whatever the first is:
+                # it is what a part's answers are compared with, and it has every page for what a part lacked.
+                spans = shared() if number == 1 else []
+                reply = (in_parts(number, spans) if spans
+                         else cls._exec(directory, environment, reply_name=reply_name, running=running, **request))
                 # How long each read took, and so how far apart the two of one run end; never what it said.
                 print(json.dumps({"event": "codex_read_done", "read": number,
                                   "seconds": round(time.monotonic() - began, 1)}), flush=True)
@@ -1162,6 +1400,10 @@ class CodexCliSolver(Solver):
                 back, late = concurrent.futures.wait(pending, return_when=concurrent.futures.FIRST_COMPLETED)
                 first_s = time.monotonic() - began
                 more = min(max(_SECOND_READ_LEAST_S, first_s), _SECOND_READ_MOST_S)
+                if outline is not None and outline.done() and shared():
+                    # A read in parts is back in a fraction of the time the whole read takes: waited for only as
+                    # long again, the whole read would be ended every time and nothing would ever be compared.
+                    more = _SECOND_READ_MOST_S
                 # A first read that failed, or whose reply no answer list can be made of, is waited behind as before.
                 usable = next((done for done in back if cls._usable(done, question)), None) if late else None
                 if usable is not None and on_first is not None:

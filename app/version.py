@@ -387,7 +387,19 @@ from __future__ import annotations
 #         delivered as a known failure; Work's inventory presses Work again on a page still settling; the gathering
 #         gives the same pages in about two thirds of the time (kept arrays; 38.3 s to 25.3 s a clip on the phone);
 #         a read can be made in parts at the same time (ROKID_CODEX_PARTS, 1 by default; 3 on the phone).
-APP_VERSION = "0.88.0"
+# 0.89.0: the operator, 2026-11-18 night: tools and models are to be kept at the latest, and what is done about
+#         the limits on images and on use. The read in parts of 0.88.0 sent every image with every part of both
+#         reads (six times one whole read's bytes for twelve pages in three parts) and had been tried on Wi-Fi
+#         only, where the venue has the mobile network: the first read is now made in parts by the booklet's
+#         major problems (a small request beside the one that locates the pages says where they begin), each part
+#         with its own captures, and the second read is whole. A request the service refuses for its rate is sent
+#         again and is no usage limit (it had closed the CLI and Work for the booklet). The proxy logs what a
+#         request uploaded and how fast, and each request the tokens the CLI says it used. The Codex route follows the newest Sol the CLI's own model list offers,
+#         and the model this was built on when that one is refused. With ROKID_CODEX_AUTO_UPDATE=1 the server
+#         installs a newer stable CLI beside the one in use at night, tries it with a real request and only then
+#         runs it (app/codex_update.py). The check before use reports the usage window nearer its limit. See API
+#         1.54.0.
+APP_VERSION = "0.89.0"
 
 # HTTP API envelope. Path prefix stays "/v1" until a breaking envelope change.
 # 1.2.0: /match responses gained the additive `ocr_similarity` field.
@@ -547,7 +559,11 @@ APP_VERSION = "0.88.0"
 #         a question only the second read listed, and drops that item (or ends with `read-once`). A client has
 #         to take a newer snapshot whose list of questions grew or shrank around the ones it holds (glassdoc
 #         0.44.18; an older one refuses it and is notified again every five seconds).
-API_VERSION = "1.53.0"
+# 1.54.0: /v1/settings gains `codex_update`: what the last attempt to bring the Codex CLI to its newest stable
+#         release found (result, version, from, to, step, checked_at; numbers and fixed words), or null where the
+#         host does not keep the CLI up to date by itself. A route's `usage` in `route_check` is of the window
+#         nearer its limit when the service names two.
+API_VERSION = "1.54.0"
 
 # Matching algorithm identity. Bump when thresholds or hashing change so a
 # re-index/eval is triggered. Mirrors thresholds in app/matching.py.

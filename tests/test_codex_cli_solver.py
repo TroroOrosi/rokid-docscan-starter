@@ -63,14 +63,33 @@ call["reply_file"] = output.name
 second = output.name.startswith("reply-2")  # the second read, whole ("reply-2.json") or a part of it ("reply-2-1.json")
 # What this one request does, by its reply file: {"reply-1-2.json": {"reply": ..., "fail": ..., "sleep": ...}}.
 mine = json.loads(os.environ.get("FAKE_CODEX_PARTS") or "{}").get(output.name, {})
+gone = json.loads(os.environ.get("FAKE_CODEX_FAIL_MODEL") or "{}")  # {"model": "...", "message": "..."}
+if gone and args[args.index("-m") + 1] == gone["model"]:
+    sys.stderr.write(gone["message"])
+    sys.exit(1)
 locating = any(name.startswith("photo") for name in sizes)
+if any(name.startswith("capture") for name in sizes):  # the request that asks where the major problems begin
+    if os.environ.get("FAKE_CODEX_OUTLINE_FAIL"):
+        sys.stderr.write(os.environ["FAKE_CODEX_OUTLINE_FAIL"])
+        sys.exit(1)
+    time.sleep(float(os.environ.get("FAKE_CODEX_OUTLINE_SLEEP", "0")))
+    output.write_text(os.environ.get("FAKE_CODEX_OUTLINE", '{"starts": []}'), encoding="utf-8")
+    sys.exit(0)
 if locating and os.environ.get("FAKE_CODEX_LOCATE_FAIL"):
     sys.stderr.write(os.environ["FAKE_CODEX_LOCATE_FAIL"])
     sys.exit(1)
 if locating:
     time.sleep(float(os.environ.get("FAKE_CODEX_LOCATE_SLEEP", "0")))
+    print("tokens used\n12,345")
     Path(args[args.index("-o") + 1]).write_text(os.environ.get("FAKE_CODEX_REGIONS", '{"images": []}'), encoding="utf-8")
     sys.exit(0)
+first = json.loads(os.environ.get("FAKE_CODEX_FAIL_FIRST") or "{}")  # {"times": 2, "message": "..."}
+refused = Path(os.environ["FAKE_CODEX_RECORD"] + ".refused")
+if first and "canary.jpg" not in sizes and (refused.stat().st_size if refused.exists() else 0) < first["times"]:
+    with open(refused, "ab") as marker:
+        marker.write(b"x")
+    sys.stderr.write(first["message"])
+    sys.exit(1)
 failure = mine.get("fail") or os.environ.get("FAKE_CODEX_FAIL") or (
     "canary.jpg" not in sizes and os.environ.get("FAKE_CODEX_FAIL_2" if second else "FAKE_CODEX_FAIL_1"))
 if failure:
@@ -86,7 +105,9 @@ if "canary.jpg" in sizes:
     picture = Image.open("canary.jpg").convert("L")
     dark = [picture.getpixel((x, picture.height // 2)) < 128 for x in range(picture.width)]
     count = sum(1 for x in range(len(dark)) if dark[x] and not (x and dark[x - 1]))
-    Path(args[args.index("-o") + 1]).write_text(os.environ.get("FAKE_CODEX_CANARY_REPLY", str(count)), encoding="utf-8")
+    Path(args[args.index("-o") + 1]).write_text(os.environ.get(
+        "FAKE_CODEX_CANARY_REPLY", json.dumps({"squares": count}) if "--output-schema" in args else str(count)),
+        encoding="utf-8")
     sys.exit(0)
 time.sleep(float(mine.get("sleep") or second and os.environ.get("FAKE_CODEX_SLEEP_2") or os.environ.get("FAKE_CODEX_SLEEP", "0")))
 if second and os.environ.get("FAKE_CODEX_BAD_BYTES_2"):
@@ -120,7 +141,8 @@ def codex(tmp_path, monkeypatch):
                  "FAKE_CODEX_CANARY_REPLY", "FAKE_CODEX_REPLY_2", "FAKE_CODEX_FAIL_1", "FAKE_CODEX_FAIL_2",
                  "FAKE_CODEX_SLEEP", "FAKE_CODEX_ROLLOUT", "FAKE_CODEX_LOCATE_SLEEP", "FAKE_CODEX_SLEEP_2",
                  "FAKE_CODEX_BAD_BYTES_2", "FAKE_CODEX_STDOUT", "ROKID_CODEX_TIMEOUT_S", "FAKE_CODEX_PARTS",
-                 "ROKID_CODEX_PARTS"):
+                 "ROKID_CODEX_PARTS", "FAKE_CODEX_OUTLINE", "FAKE_CODEX_OUTLINE_FAIL", "FAKE_CODEX_OUTLINE_SLEEP",
+                 "FAKE_CODEX_FAIL_FIRST", "FAKE_CODEX_FAIL_MODEL", "ROKID_CODEX_MODEL"):
         monkeypatch.delenv(name, raising=False)
     # The CLI's own folder is this test's: the check reads the session record its request leaves there.
     monkeypatch.setenv("CODEX_HOME", str(tmp_path / "codex-home"))
@@ -159,8 +181,16 @@ def test_the_cli_answers_in_fast_mode_unless_a_trial_asks_for_standard(codex, tm
 
 
 def _runs(calls):
-    """The requests that ask for answers (not the one that asks where the pages are)."""
-    return [call for call in calls if call["args"][:1] == ["exec"] and not _locating(call)]
+    """The requests that ask for answers (not the ones that ask where the pages are or where the major problems begin)."""
+    return [call for call in calls if call["args"][:1] == ["exec"] and not _locating(call) and not _outlining(call)]
+
+
+def _outlining(call):
+    return call["args"][:1] == ["exec"] and any(name.startswith("capture") for name in call.get("sizes", {}))
+
+
+def _outlines(calls):
+    return [call for call in calls if _outlining(call)]
 
 
 def _locating(call):
@@ -253,7 +283,9 @@ _NO_MESSAGE = "Warning: no last agent message; wrote empty content to reply.json
 @pytest.mark.parametrize("stdout, stderr", [
     ("", "ERROR: " + _AT_LIMIT),
     ("", _AT_LIMIT + "\n" + _NO_MESSAGE),
-    ("", "ERROR: Rate limit reached for requests. Please try again in 20s.\n" + _NO_MESSAGE),
+    # The allowance's other sentences in the CLI (codex-rs/protocol/src/error.rs at rust-v0.170.0, read 2026-11-18).
+    ("", "ERROR: Quota exceeded. Check your plan and billing details.\n" + _NO_MESSAGE),
+    ("", "ERROR: Your workspace is out of credits.\n" + _NO_MESSAGE),
     (json.dumps({"type": "error", "message": _AT_LIMIT}), _NO_MESSAGE),
     (json.dumps({"type": "turn.failed", "error": {"message": _AT_LIMIT}}), _NO_MESSAGE),
 ])
@@ -271,6 +303,38 @@ def test_the_clis_own_sentence_is_a_usage_limit_wherever_it_stands_in_what_the_c
     monkeypatch.setenv("FAKE_CODEX_FAIL", "ERROR: " + _AT_LIMIT + "\n" + after)
     with pytest.raises(ChatGptWebRateLimit):
         codex_cli.CodexCliSolver().answer_all(question=_booklet(tmp_path))
+
+
+# A request refused for its rate, in the CLI's words (codex-rs at rust-v0.170.0, read 2026-11-18: api_bridge.rs,
+# protocol/src/error.rs, sse/responses_error.rs). An HTTP 429 that is not the allowance is retried by the CLI only
+# when the service names a wait; a rate limit inside the stream it retries five times in about six seconds.
+_REFUSED = ["ERROR: exceeded retry limit, last status: 429 Too Many Requests, request id: 0000",
+            "ERROR: rate limit exceeded: Rate limit reached for requests. Please try again in 20s.",
+            "ERROR: Selected model is at capacity. Please try a different model."]
+
+
+@pytest.mark.parametrize("message", _REFUSED)
+def test_a_request_refused_for_its_rate_is_sent_again_and_is_no_usage_limit(codex, tmp_path, monkeypatch, capsys, message):
+    """Until 2026-11-18 the words "rate limit" on an error line were a usage limit, which closes the CLI and Work
+    for the booklet and leaves Chat: that evening Chat did not answer a booklet in an hour. A read in parts sends
+    several requests at once, and what the service answers to that is not known."""
+    monkeypatch.setattr(codex_cli, "_RATE_WAITS", (0.1, 0.2))
+    monkeypatch.setenv("FAKE_CODEX_FAIL_FIRST", json.dumps({"times": 2, "message": message + "\n" + _NO_MESSAGE}))
+    replies = codex_cli.CodexCliSolver().answer_all(question=_booklet(tmp_path))
+
+    assert len(replies) == 2 and len(_runs(codex())) == 3
+    told = [json.loads(line) for line in capsys.readouterr().out.splitlines() if '"codex_rate_refused"' in line]
+    assert told == [{"event": "codex_rate_refused", "again_in_s": 0.1}, {"event": "codex_rate_refused", "again_in_s": 0.2}]
+
+
+@pytest.mark.parametrize("message", _REFUSED)
+def test_a_request_refused_for_its_rate_every_time_is_a_send_that_did_not_happen(codex, tmp_path, monkeypatch, message):
+    monkeypatch.setattr(codex_cli, "_RATE_WAITS", (0.1,))
+    monkeypatch.setenv("FAKE_CODEX_FAIL", message + "\n" + _NO_MESSAGE)
+    with pytest.raises(ChatGptWebError) as raised:
+        codex_cli.CodexCliSolver().answer_all(question=_booklet(tmp_path))
+    assert type(raised.value) is ChatGptWebError, "the bare class: the other routes stay open"
+    assert len(_runs(codex())) == 2
 
 
 @pytest.mark.parametrize("stdout, stderr", [
@@ -300,6 +364,105 @@ def test_a_run_that_fails_for_another_reason_is_a_send_that_did_not_happen(codex
         codex_cli.CodexCliSolver().answer_all(question=_booklet(tmp_path))
     assert type(raised.value) is ChatGptWebError, "the bare class is what the server retries and moves to another route"
     assert "error sending request" in str(raised.value), "the CLI's own last line is the only record of the cause"
+
+
+def test_a_newly_installed_release_is_tried_as_a_booklets_requests_run_it(codex, tmp_path, monkeypatch):
+    """Before the route runs a release it has installed by itself (app/codex_update.py): signed in, and one request
+    with every flag the booklet's requests use, answered from the picture."""
+    new = codex_cli._command()
+    monkeypatch.setattr(codex_cli, "_command", lambda: ["the-release-in-use"])  # not what is tried
+    codex_cli.CodexCliSolver.verify(new)
+
+    status, run = codex()[-2:]
+    assert status["args"] == ["login", "status"]
+    args = run["args"]
+    assert {"exec", "-m", "-s", "--skip-git-repo-check", "--ephemeral", "--output-schema", "-i", "-o"} <= set(args)
+    assert "service_tier=priority" in args and "model_reasoning_effort=low" in args
+    assert run["schema"]["required"] == ["squares"] and list(run["sizes"]) == ["canary.jpg"]
+    monkeypatch.setenv("FAKE_CODEX_CANARY_REPLY", '{"squares": 99}')
+    with pytest.raises(ChatGptWebCheckFailed):
+        codex_cli.CodexCliSolver.verify(new)
+    monkeypatch.setenv("FAKE_CODEX_CANARY_REPLY", "It shows squares.")
+    with pytest.raises(ChatGptWebCheckFailed):
+        codex_cli.CodexCliSolver.verify(new)
+    monkeypatch.setenv("FAKE_CODEX_LOGIN", "Not logged in")
+    with pytest.raises(ChatGptWebAuthenticationRequired):
+        codex_cli.CodexCliSolver.verify(new)
+
+
+def _offered(home, *models, version="0.170.0"):
+    """The CLI's own model list as it keeps it (models_cache.json): slug, visibility and context window, in the
+    order of their priority."""
+    home.mkdir(parents=True, exist_ok=True)
+    (home / "models_cache.json").write_text(json.dumps({"client_version": version, "models": [
+        {"slug": slug, "visibility": visibility, "priority": priority, "context_window": window}
+        for priority, (slug, visibility, window) in enumerate(models, 1)]}), encoding="utf-8")
+
+
+def _model_of(call):
+    return call["args"][call["args"].index("-m") + 1]
+
+
+def test_a_booklet_is_read_with_the_newest_sol_the_clis_own_model_list_offers(codex, tmp_path, monkeypatch, capsys):
+    """The operator, 2026-11-18: tools and models are to be kept at the latest. GPT-6.2 Sol had been out a day
+    before anyone here looked, and the model's name was a constant. The CLI keeps the list the service offers its
+    version (models_cache.json, fetched again by every run older than five minutes; codex-rs models-manager at
+    rust-v0.170.0): the newest Sol in it that is shown and has the context this route sizes a booklet for."""
+    _offered(tmp_path / "codex-home", ("gpt-6.3-astra", "list", 272000), ("gpt-6.3-sol", "list", 500000),
+             ("gpt-6.2-sol", "list", 500000), ("gpt-7-sol", "hide", 500000), ("gpt-6.10-sol-preview", "list", 500000),
+             ("gpt-6.4-sol", "list", 272000))
+    replies = codex_cli.CodexCliSolver().answer_all(question=_booklet(tmp_path))
+
+    assert {_model_of(call) for call in codex() if call["args"][:1] == ["exec"]} == {"gpt-6.3-sol"}
+    assert all(result.extras["model"] == "gpt-6.3-sol" for _, result in replies)
+    assert '"codex_model"' in capsys.readouterr().out
+    codex_cli.CodexCliSolver().check()
+    assert _model_of(codex()[-1]) == "gpt-6.3-sol", "the check before use tries what a booklet will be read with"
+
+
+@pytest.mark.parametrize("models, named, expected", [
+    (None, None, codex_cli.MODEL),                                                    # no list kept
+    ("not json", None, codex_cli.MODEL),
+    ([("gpt-6.1-sol", "list", 500000), ("gpt-6-sol", "list", 272000)], None, codex_cli.MODEL),  # nothing newer
+    ([("gpt-6.3-sol", "list", 272000)], None, codex_cli.MODEL),                        # newer, with less context
+    ([("gpt-6.3-sol", "hide", 500000)], None, codex_cli.MODEL),                        # newer, not shown
+    ([("gpt-6.9-sol", "list", 500000), ("gpt-6.10-sol", "list", 600000)], None, "gpt-6.10-sol"),  # by number
+    ([("gpt-6.3-sol", "list", 500000)], "gpt-6.1-sol", "gpt-6.1-sol"),                 # the operator's own choice
+], ids=["no list", "unreadable", "older", "small context", "hidden", "numeric", "named"])
+def test_the_model_is_never_older_than_the_one_this_was_built_on_unless_it_is_named(codex, tmp_path, monkeypatch,
+                                                                                    models, named, expected):
+    home = tmp_path / "codex-home"
+    if isinstance(models, list):
+        _offered(home, *models)
+    elif models:
+        home.mkdir(parents=True)
+        (home / "models_cache.json").write_text(models, encoding="utf-8")
+    if named:
+        monkeypatch.setenv("ROKID_CODEX_MODEL", named)
+    assert codex_cli._model() == expected
+
+
+def test_a_newer_model_the_service_refuses_gives_the_booklet_to_the_model_this_was_built_on(codex, tmp_path, monkeypatch, capsys):
+    """Listed and refused has not been seen. What it would cost is known: a model that is not offered hands the
+    booklet to Work and Chat, and neither answers a booklet inside a test's time (2026-11-18)."""
+    _offered(tmp_path / "codex-home", ("gpt-6.3-sol", "list", 500000))
+    monkeypatch.setenv("FAKE_CODEX_FAIL_MODEL", json.dumps({"model": "gpt-6.3-sol", "message": _MODEL_GONE[1]}))
+    replies = codex_cli.CodexCliSolver().answer_all(question=_booklet(tmp_path))
+
+    tried = [_model_of(call) for call in codex() if call["args"][:1] == ["exec"]]
+    assert tried[0] == "gpt-6.3-sol" and tried[-1] == codex_cli.MODEL and len(replies) == 2
+    assert all(result.extras["model"] == codex_cli.MODEL for _, result in replies)
+    assert '"codex_model_refused"' in capsys.readouterr().out
+    codex_cli.CodexCliSolver().check()
+    assert _model_of(codex()[-1]) == codex_cli.MODEL, "and the check passes with it"
+
+
+def test_a_named_model_that_is_refused_is_not_replaced(codex, tmp_path, monkeypatch):
+    monkeypatch.setenv("ROKID_CODEX_MODEL", "gpt-6.1-sol")
+    monkeypatch.setenv("FAKE_CODEX_FAIL_MODEL", json.dumps({"model": "gpt-6.1-sol", "message": _MODEL_GONE[1]}))
+    with pytest.raises(ChatGptWebModelMismatch):
+        codex_cli.CodexCliSolver().answer_all(question=_booklet(tmp_path))
+    assert {_model_of(call) for call in codex() if call["args"][:1] == ["exec"]} == {"gpt-6.1-sol"}
 
 
 # A model the service no longer offers. The first line is the CLI's own warning, read from the binary of a CLI
@@ -444,6 +607,40 @@ def test_the_proxy_tunnels_port_443_by_name_and_refuses_anything_else(monkeypatc
             assert refused.recv(100).startswith(b"HTTP/1.1 4")
             refused.close()
     assert asked == [("chatgpt.com", 443)] and seen["received"] == b"ping"
+
+
+def test_the_proxy_says_how_much_a_request_sent_and_how_fast(monkeypatch, capsys):
+    """What a booklet's request uploads is 20 to 45 MB and the venue has the mobile network. Until 2026-11-18 nothing
+    recorded how long that took: a way of reading that sent three times the bytes was tried on Wi-Fi alone."""
+    upstream = socket.socket()
+    upstream.bind(("127.0.0.1", 0))
+    upstream.listen(1)
+    got = []
+
+    def sink():
+        connection, _ = upstream.accept()
+        while len(b"".join(got)) < 3_000_000:
+            got.append(connection.recv(65536))
+        connection.sendall(b"done")
+        connection.close()
+
+    threading.Thread(target=sink, daemon=True).start()
+    monkeypatch.setattr(codex_cli, "_connect_upstream", lambda address, timeout=None: socket.create_connection(
+        ("127.0.0.1", upstream.getsockname()[1]), timeout=timeout))
+    with codex_cli.name_resolving_proxy() as port:
+        client = socket.create_connection(("127.0.0.1", port), timeout=5)
+        client.sendall(b"CONNECT chatgpt.com:443 HTTP/1.1\r\nHost: chatgpt.com:443\r\n\r\n")
+        assert client.recv(100).startswith(b"HTTP/1.1 200")
+        client.sendall(b"\x17" * 3_000_000)
+        assert client.recv(100) == b"done"
+        client.close()
+        small = socket.create_connection(("127.0.0.1", port), timeout=5)  # a tunnel that sent little says nothing
+        small.close()
+        deadline = time.monotonic() + 5
+        while '"codex_upload"' not in (printed := capsys.readouterr().out) and time.monotonic() < deadline:
+            time.sleep(0.05)
+    [told] = [json.loads(line) for line in printed.splitlines() if '"codex_upload"' in line]
+    assert told["mb"] == 3.0 and told["seconds"] >= 0 and set(told) == {"event", "mb", "seconds", "mbit_s"}
 
 
 @pytest.mark.parametrize("allowed, kept", [(1650.0, 1650.0), (90.0, 600.0)])
@@ -1049,6 +1246,33 @@ def test_the_check_says_how_much_of_the_allowance_is_used(codex, tmp_path, monke
 
     assert codex_cli.CodexCliSolver().check() == {
         "usage": {"used_percent": 3.0, "window_minutes": 10080, "resets_at": 1795429113}}
+
+
+def test_every_request_logs_the_tokens_the_cli_says_it_used(codex, tmp_path, monkeypatch, capsys):
+    """What a booklet costs of the allowance was known only from a display that moves in whole percents: 11% to 14%
+    over three booklets, a replay and some small requests on 2026-11-18. The CLI ends a run with the tokens it used
+    (97,131 for 47 pages and 38,258 for 14 on record, M-23: not every input token, so what the service counts)."""
+    monkeypatch.delenv("ROKID_CODEX_READS", raising=False)
+    codex_cli.CodexCliSolver().answer_all(question=_booklet(tmp_path, pages=3))
+
+    told = [json.loads(line) for line in capsys.readouterr().out.splitlines() if '"codex_tokens"' in line]
+    assert sorted(told, key=lambda line: line["images"]) == [
+        {"event": "codex_tokens", "tokens": 12345, "images": 3}, {"event": "codex_tokens", "tokens": 12345, "images": 3},
+        {"event": "codex_tokens", "tokens": 12345, "images": 3}], "the request that locates the pages and both reads"
+
+
+def test_of_two_windows_the_check_reports_the_one_nearer_its_limit(codex, tmp_path, monkeypatch):
+    """The phone's plan has the weekly window alone (the service's own records there, 2026-11-16 to 11-18:
+    ``secondary`` null). Other plans have a five-hour window as well, and where
+    both apply allowance has to remain in both (Help Center, read 2026-11-18): the one that runs out first is the
+    one to show. Until 2026-11-18 only ``primary`` was read."""
+    week = {"used_percent": 12.0, "window_minutes": 10080, "resets_at": 1795429113}
+    hours = {"used_percent": 81.0, "window_minutes": 300, "resets_at": 1795000000}
+    for limits, shown in (({"primary": week, "secondary": hours}, hours), ({"primary": hours, "secondary": week}, hours),
+                          ({"primary": week, "secondary": None}, week), ({"primary": week, "secondary": {"used_percent": "much"}}, week),
+                          ({"primary": None, "secondary": hours}, hours)):
+        monkeypatch.setenv("FAKE_CODEX_ROLLOUT", json.dumps({"payload": {"rate_limits": limits}}))
+        assert codex_cli.CodexCliSolver().check() == {"usage": shown}
 
 
 def test_a_check_whose_request_left_no_readable_record_still_passes(codex, tmp_path, monkeypatch):
@@ -1788,9 +2012,12 @@ def test_an_answer_only_the_second_read_gave_stands_under_the_first_reads_questi
     assert (item["label"], result.answer, result.extras["review_note"]) == ("問1", "④", codex_cli._ONE_ANSWERED)
 
 
-# A read in parts (ROKID_CODEX_PARTS, off unless set): each read is that many requests at the same time, every one
-# with all the images and the whole prompt, and asked for the questions of its own capture pages only. One read of
-# twelve pages with 47 questions took 515 s on 2026-11-18, most of it the model's reasoning and writing.
+# A read in parts (ROKID_CODEX_PARTS, off unless set). A small request beside the one that locates the pages asks on
+# which captures the booklet's major problems begin. The first read is then one request for each group of major
+# problems, all at the same time, each with its own captures at full size and the others as their small overviews at
+# most; the second read is whole, as ever. Until the night of 2026-11-18 every part of both reads carried every image:
+# twelve pages in three parts sent six times what one whole read sends (about 500 MB in an hour of trials on Wi-Fi),
+# where that morning's use, two whole reads a booklet over the mobile network, had sent 50 to 60 MB a booklet.
 
 
 def _item(number, answer, pages, group="第1問"):
@@ -1799,12 +2026,15 @@ def _item(number, answer, pages, group="第1問"):
             "answer": answer, "missing_material": "", "diagrams": []}
 
 
-def _parts(monkeypatch, count, requests=None):
-    """Each read in ``count`` requests. ``requests`` says what the stand-in does for one of them, named by read and
-    part ("1-2" is the second part of the first read): the questions of its reply or its reply as text, a failure,
-    seconds of sleep. A request not named replies as a whole read does."""
+def _parts(monkeypatch, count, requests=None, starts=None):
+    """The first read in ``count`` requests at most, the booklet's major problems beginning on the capture pages
+    ``starts`` (none told when left out). ``requests`` says what the stand-in does for one request, named by its
+    reply file ("1-2" is the second part of the first read, "2" the second read, which is whole): the questions of
+    its reply or its reply as text, a failure, seconds of sleep. A request not named replies as a whole read does."""
     monkeypatch.setenv("ROKID_CODEX_PARTS", str(count))
     monkeypatch.setenv("ROKID_CODEX_LOCATE", "0")
+    if starts is not None:
+        monkeypatch.setenv("FAKE_CODEX_OUTLINE", json.dumps({"starts": starts}))
     monkeypatch.setenv("FAKE_CODEX_PARTS", json.dumps({
         f"reply-{name}.json": {"reply": json.dumps({"questions": does["questions"]}, ensure_ascii=False), **does}
         if "questions" in does else does for name, does in (requests or {}).items()}, ensure_ascii=False))
@@ -1825,11 +2055,19 @@ def _sent(calls):
     return sorted(sent)
 
 
+def _attached(call):
+    args = call["args"]
+    return [args[index + 1] for index, value in enumerate(args) if value == "-i"]
+
+
+_WHOLE = codex_cli._ANSWER_ONLY_SYSTEM + "\n\n" + codex_cli._ALL_TASK + codex_cli._IMAGES_NOTE
+
+
 @pytest.mark.parametrize("reads, parts, pages", [("1", "1", 4), ("2", "1", 4), ("2", "0", 4), ("2", "3", 3),
                                                  ("2", "three", 4)])
 def test_one_part_asks_exactly_what_is_asked_without_the_setting(codex, tmp_path, monkeypatch, capsys, reads, parts, pages):
     """The default, a booklet of fewer than four pages whatever is set, and a setting that is no number (which is
-    said, and gives no booklet away): the same requests to the last byte."""
+    said, and gives no booklet away): the same requests to the last byte, and nothing asked about major problems."""
     monkeypatch.setenv("ROKID_CODEX_READS", reads)
     question = _booklet(tmp_path, pages=pages)
     codex_cli.CodexCliSolver().answer_all(question=question)
@@ -1840,64 +2078,133 @@ def test_one_part_asks_exactly_what_is_asked_without_the_setting(codex, tmp_path
 
     after = codex()[len(before):]
     assert _sent(after) == _sent(before)
+    assert not _outlines(after)
     # ... and that is the request as it was before there were parts: its files' names, and not a word after it.
-    whole = codex_cli._ANSWER_ONLY_SYSTEM + "\n\n" + codex_cli._ALL_TASK + codex_cli._IMAGES_NOTE
     assert sorted(call["reply_file"] for call in _runs(after)) == (
         ["reply.json"] if reads == "1" else ["reply-1.json", "reply-2.json"])
-    assert all(call["args"][-1] == whole for call in _runs(after))
+    assert all(call["args"][-1] == _WHOLE for call in _runs(after))
     assert len(_events(capsys.readouterr().out, "codex_parts_setting_ignored")) == (parts == "three")
 
 
-def test_the_parts_page_ranges_are_contiguous_as_even_as_can_be_and_two_pages_each_at_least():
-    spans = codex_cli._spans
-    assert spans(list(range(1, 13)), 3) == [(1, 4), (5, 8), (9, 12)]
-    assert spans(list(range(1, 14)), 3) == [(1, 5), (6, 9), (10, 13)]
-    assert spans(list(range(1, 6)), 3) == [(1, 3), (4, 5)], "three parts do not fit five pages: the most that do"
-    assert spans([1, 2, 3], 3) == [(1, 3)] and spans([1], 4) == [(1, 1)], "one range is the read as it was"
-    assert spans(list(range(1, 13)), 1) == [(1, 12)] == spans(list(range(1, 13)), 0)
-    assert spans([1, 2, 4, 5, 7, 8], 3) == [(1, 2), (4, 5), (7, 8)], "by the capture page numbers the booklet has"
+def test_the_major_problems_are_asked_for_beside_the_request_that_locates_the_pages(codex, tmp_path, monkeypatch):
+    """Phone's model through the PC's CLI, 2026-11-18: four booklets of that day's use, twice each, from 1024-px
+    views at low effort: the same captures both times, and those the full reads' own question lists begin on."""
+    monkeypatch.setenv("ROKID_CODEX_PARTS", "3")
+    monkeypatch.setenv("FAKE_CODEX_LOCATE_SLEEP", "2")
+    monkeypatch.setenv("FAKE_CODEX_OUTLINE_SLEEP", "2")
+    codex_cli.CodexCliSolver().answer_all(question=_booklet(tmp_path, pages=4))
+
+    [outline] = _outlines(codex())
+    [locate] = _locates(codex())
+    assert list(outline["sizes"]) == [f"capture{number:03d}.jpg" for number in range(1, 5)]
+    assert all(max(size) <= 1024 for size in outline["sizes"].values())
+    args = outline["args"]
+    assert "model_reasoning_effort=low" in args and outline["schema"]["required"] == ["starts"]
+    assert "major problem" in args[-1] and "capture page" in args[-1]
+    assert outline["started"] < locate["ended"] and locate["started"] < outline["ended"], "at the same time"
+    assert not any(name.startswith("capture") for call in _runs(codex()) for name in call["sizes"])
 
 
-def test_twelve_pages_in_three_parts_are_six_requests_at_the_same_time_each_with_every_page_and_its_own_range(
-        codex, tmp_path, monkeypatch):
+def test_the_major_problems_are_shared_out_among_the_parts_which_meet_on_the_capture_the_next_begins_on():
+    """(first, last capture whose major problems it answers, last capture it is sent at full size). A major problem
+    ends partway down the capture the next one begins on, so that capture goes to both parts."""
+    spans = codex_cli._section_spans
+    twelve = list(range(1, 13))
+    assert spans(twelve, [1, 3, 6], 3) == [(1, 2, 3), (3, 5, 6), (6, 12, 12)]
+    assert spans(twelve, [1, 5, 9], 3) == [(1, 4, 5), (5, 8, 9), (9, 12, 12)]
+    assert spans(twelve, [6, 3, 3, 1], 3) == [(1, 2, 3), (3, 5, 6), (6, 12, 12)], "in any order, each once"
+    assert spans(twelve, [3, 6], 3) == [(1, 2, 3), (3, 5, 6), (6, 12, 12)], "the first capture is a start whatever is said"
+    # More major problems than parts: neighbours share a part, and the largest share of captures is as small as can be.
+    assert spans(list(range(1, 9)), list(range(1, 9)), 3) == [(1, 2, 3), (3, 5, 6), (6, 8, 8)]
+    assert spans(twelve, [1, 3, 6], 2) == [(1, 5, 6), (6, 12, 12)]
+    assert spans([1, 2, 4, 5, 7, 8], [1, 4, 7], 3) == [(1, 2, 4), (4, 5, 7), (7, 8, 8)], "by the capture pages the booklet has"
+    assert spans(twelve, list(range(1, 13)), 9) == spans(twelve, list(range(1, 13)), codex_cli._PARTS_MOST)
+    # No second start, nothing usable, or one part asked for: no parts, which is the read as it was.
+    for starts in ([1], [], [0, 99, "3", None, 2.5, True], "1, 3, 6", None):
+        assert spans(twelve, starts, 3) == []
+    assert spans(twelve, [1, 3, 6], 1) == [] == spans([], [1, 3], 3)
+
+
+def test_twelve_pages_of_three_major_problems_are_three_requests_and_the_whole_read_at_the_same_time(
+        codex, tmp_path, monkeypatch, capsys):
     monkeypatch.delenv("ROKID_CODEX_READS", raising=False)  # the default of two
-    _parts(monkeypatch, 3)
-    monkeypatch.setenv("FAKE_CODEX_SLEEP", "3")  # six processes to start before the first of them ends
+    _parts(monkeypatch, 3, starts=[1, 5, 9])
+    monkeypatch.setenv("FAKE_CODEX_SLEEP", "3")  # four processes to start before the first of them ends
     codex_cli.CodexCliSolver().answer_all(question=_booklet(tmp_path, pages=12))
 
     runs = {call["reply_file"]: call for call in _runs(codex())}
-    assert sorted(runs) == [f"reply-{read}-{part}.json" for read in (1, 2) for part in (1, 2, 3)], "a file each"
+    assert sorted(runs) == ["reply-1-1.json", "reply-1-2.json", "reply-1-3.json", "reply-2.json"], "a file each"
     assert max(call["started"] for call in runs.values()) < min(call["ended"] for call in runs.values()), "at the same time"
-    whole = codex_cli._ANSWER_ONLY_SYSTEM + "\n\n" + codex_cli._ALL_TASK + codex_cli._IMAGES_NOTE
-    ranges = {"1": "1 to 4", "2": "5 to 8", "3": "9 to 12"}
+    whole = runs.pop("reply-2.json")
+    assert _attached(whole) == [f"page{number:03d}.jpg" for number in range(1, 13)] and whole["args"][-1] == _WHOLE, (
+        "the second read is the whole read as it was")
+    shares = {"1": (1, 4, 5), "2": (5, 8, 9), "3": (9, 12, 12)}
     for name, call in runs.items():
-        args = call["args"]
-        assert [args[i + 1] for i, a in enumerate(args) if a == "-i"] == [f"page{n:03d}.jpg" for n in range(1, 13)]
-        assert args[-1].startswith(whole), "the whole request as a read in one piece has it"
-        added = args[-1][len(whole):]
-        own = ranges[name[len("reply-1-")]]
-        assert f"Answer only the questions whose own text begins on capture pages {own}" in added
-        assert not any(f"capture pages {other}" in added for other in ranges.values() if other != own)
-        assert "context" in added and "list nothing from it" in added and '{"questions":[]}' in added
+        first, own_last, last = shares[name[len("reply-1-")]]
+        assert _attached(call) == [f"page{number:03d}.jpg" for number in range(first, last + 1)], (
+            "its own captures and the one the next part begins on, nothing else at full size")
+        assert call["args"][-1].startswith(_WHOLE), "the whole request as a read in one piece has it"
+        added = call["args"][-1][len(_WHOLE):]
+        assert f"major problems that begin on capture pages {first} to {own_last}" in added
+        assert f"at full size: capture pages {first} to {last}" in added
+        others = [share for share in shares.values() if share != (first, own_last, last)]
+        assert not any(f"begin on capture pages {other[0]} to {other[1]}" in added for other in others)
+        assert "needs_input" in added and "overview" in added and '{"questions":[]}' in added
+    # What the first read sends: every capture once and the two the parts meet on twice, not three times the booklet.
+    assert sum(len(_attached(call)) for call in runs.values()) == 12 + 2
+    [told] = _events(capsys.readouterr().out, "codex_outline")
+    assert (told["starts"], told["parts"]) == (3, 3) and set(told) == {"event", "starts", "parts", "seconds"}
 
 
-def test_a_booklet_too_small_for_the_parts_asked_is_read_in_as_many_as_hold_two_pages_each(codex, tmp_path, monkeypatch):
+def test_a_part_is_sent_every_overview_and_the_enlarged_regions_of_its_own_captures_only(codex, tmp_path, monkeypatch):
+    monkeypatch.setenv("ROKID_CODEX_PARTS", "2")
+    monkeypatch.setenv("FAKE_CODEX_OUTLINE", json.dumps({"starts": [1, 3]}))
+    monkeypatch.setenv("FAKE_CODEX_REGIONS", json.dumps({"images": [
+        {"index": number, "regions": [{"left": 100, "top": 100, "right": 900, "bottom": 900, "vertical_text": False}]}
+        for number in range(1, 5)]}))
+    codex_cli.CodexCliSolver().answer_all(question=_booklet(tmp_path, pages=4))
+
+    runs = {call["reply_file"]: call for call in _runs(codex())}
+    assert sorted(runs) == ["reply-1-1.json", "reply-1-2.json"], "one read asked for: that read, in its parts"
+    for name, captures in (("reply-1-1.json", {1, 2, 3}), ("reply-1-2.json", {3, 4})):
+        names = _attached(runs[name])
+        assert [one for one in names if one.startswith("overview")] == [f"overview{number:03d}.jpg" for number in range(1, 5)]
+        assert {int(one[4:7]) for one in names if one.startswith("page")} == captures
+        assert len(names) > 4 and "small overview" in runs[name]["args"][-1]
+
+
+@pytest.mark.parametrize("told", [{"FAKE_CODEX_OUTLINE": '{"starts": []}'}, {"FAKE_CODEX_OUTLINE": '{"starts": [1]}'},
+                                  {"FAKE_CODEX_OUTLINE": "I cannot tell."},
+                                  {"FAKE_CODEX_OUTLINE_FAIL": "error sending request for url"},
+                                  {"FAKE_CODEX_OUTLINE_FAIL": "ERROR: You've hit your usage limit. Try again in 3 hours."}],
+                         ids=["none", "one start", "prose", "fails", "limit"])
+def test_a_booklet_whose_major_problems_are_not_told_is_read_whole_twice_as_without_the_setting(
+        codex, tmp_path, monkeypatch, capsys, told):
+    """Captures shared out by their count alone would part a passage from its questions. A request about the major
+    problems that fails costs the booklet nothing: the reads say for themselves what is wrong with the route."""
+    monkeypatch.delenv("ROKID_CODEX_READS", raising=False)
     _parts(monkeypatch, 3)
-    codex_cli.CodexCliSolver().answer_all(question=_booklet(tmp_path, pages=5))
+    for name, value in told.items():
+        monkeypatch.setenv(name, value)
+    replies = codex_cli.CodexCliSolver().answer_all(question=_booklet(tmp_path, pages=6))
 
-    runs = sorted(_runs(codex()), key=lambda call: call["reply_file"])
-    assert [call["reply_file"] for call in runs] == ["reply-1-1.json", "reply-1-2.json"]
-    assert ["capture pages 1 to 3" in call["args"][-1] for call in runs] == [True, False]
-    assert ["capture pages 4 to 5" in call["args"][-1] for call in runs] == [False, True]
+    runs = _runs(codex())
+    assert sorted(call["reply_file"] for call in runs) == ["reply-1.json", "reply-2.json"]
+    assert all(call["args"][-1] == _WHOLE and len(_attached(call)) == 6 for call in runs)
+    assert len(replies) == 2
+    printed = capsys.readouterr().out
+    [line] = _events(printed, "codex_outline")
+    assert line["parts"] == 0 and set(line) == {"event", "starts", "parts", "seconds"}
+    assert "cannot tell" not in printed and "usage limit" not in printed
 
 
 def test_a_read_is_its_parts_question_lists_joined_in_page_order_however_the_parts_came_back(
         codex, tmp_path, monkeypatch, capsys):
     """Everything behind the requests is given one reply of the usual shape for each read. A part on whose pages no
-    question begins replies with an empty list, which is no failure."""
+    major problem begins replies with an empty list, which is no failure."""
     _parts(monkeypatch, 3, {"1-1": {"questions": [_item(1, "④", [1]), _item(2, "②", [2])], "sleep": 3},
                             "1-2": {"questions": []},
-                            "1-3": {"questions": [_item(3, "①", [5]), _item(4, "③", [6])]}})
+                            "1-3": {"questions": [_item(3, "①", [5]), _item(4, "③", [6])]}}, starts=[1, 3, 5])
     question = _booklet(tmp_path, pages=6)
     replies = codex_cli.CodexCliSolver().answer_all(question=question)
 
@@ -1918,11 +2225,11 @@ def test_a_read_is_its_parts_question_lists_joined_in_page_order_however_the_par
 @pytest.mark.parametrize("pages, kept", [([2, 3], "②"), ([2], "②"), ([3], "③"), ([3, 2], "③"), ([9], "②")])
 def test_a_question_two_parts_both_list_stays_once_from_the_part_its_first_page_lies_in_else_from_the_first(
         codex, tmp_path, monkeypatch, capsys, pages, kept):
-    """A question at the boundary of two parts may be listed by both. The same question: the same group and label
-    (as they are compared: full-width or not, spaced or not), the same printed answer numbers, a capture page in
-    common."""
+    """A question on the capture two parts meet on may be listed by both. The same question: the same group and
+    label (as they are compared: full-width or not, spaced or not), the same printed answer numbers, a capture page
+    in common."""
     _parts(monkeypatch, 2, {"1-1": {"questions": [_item(1, "④", [1]), _item(2, "②", pages)]},
-                            "1-2": {"questions": [_item(2, "③", pages, group="第１問"), _item(3, "①", [4])]}})
+                            "1-2": {"questions": [_item(2, "③", pages, group="第１問"), _item(3, "①", [4])]}}, starts=[1, 3])
     shown = _shown(codex_cli.CodexCliSolver().answer_all(question=_booklet(tmp_path, pages=4)))
 
     assert [(numbers, answer) for numbers, answer, _, _ in shown] == [([1], "④"), ([2], kept), ([3], "①")]
@@ -1944,10 +2251,13 @@ def test_what_may_be_another_question_under_the_same_name_is_never_dropped(codex
     """"Printed answer numbers may restart in another section or question, even under the same labels" (the request's
     own words): a question dropped for its name alone would be lost with nothing said. Listed twice it is seen."""
     _parts(monkeypatch, 2, {"1-1": {"questions": [_item(1, "④", [1]), first]},
-                            "1-2": {"questions": [second, _item(3, "①", [4])]}})
+                            "1-2": {"questions": [second, _item(3, "①", [4])]}}, starts=[1, 3])
     replies = codex_cli.CodexCliSolver().answer_all(question=_booklet(tmp_path, pages=4))
 
     assert len(replies) == 4 and not _events(capsys.readouterr().out, "codex_parts_duplicate")
+
+
+_BOTH = {"questions": [_item(1, "④", [1]), _item(2, "②", [3])]}
 
 
 @pytest.mark.parametrize("does, logged", [
@@ -1957,11 +2267,10 @@ def test_what_may_be_another_question_under_the_same_name_is_never_dropped(codex
     ({"reply": json.dumps({"questions": [_item(2, "②", [3])], "note": "a made-up remark"}, ensure_ascii=False)},
      "codex_reply_unusable"),
 ], ids=["fails", "prose", "no list", "a stray top-level key"])
-def test_a_part_that_fails_or_cannot_be_used_fails_its_read_and_the_other_read_answers_alone(
+def test_a_part_that_fails_or_cannot_be_used_fails_its_read_and_the_whole_read_answers_alone(
         codex, tmp_path, monkeypatch, capsys, does, logged):
     monkeypatch.delenv("ROKID_CODEX_READS", raising=False)
-    first, second = {"questions": [_item(1, "④", [1])]}, {"questions": [_item(2, "②", [3])]}
-    _parts(monkeypatch, 2, {"1-1": first, "1-2": does, "2-1": first, "2-2": second})
+    _parts(monkeypatch, 2, {"1-1": {"questions": [_item(1, "④", [1])]}, "1-2": does, "2": _BOTH}, starts=[1, 3])
     replies = codex_cli.CodexCliSolver().answer_all(question=_booklet(tmp_path, pages=4))
 
     assert _shown(replies) == [([1], "④", "ready", ""), ([2], "②", "ready", "")]
@@ -1969,20 +2278,19 @@ def test_a_part_that_fails_or_cannot_be_used_fails_its_read_and_the_other_read_a
     printed = capsys.readouterr().out
     [cause] = _events(printed, logged)
     assert set(cause) == {"event", "type", "at"} and "made-up" not in printed and "could not read" not in printed
-    assert len(_runs(codex())) == 4
+    assert len(_runs(codex())) == 3
 
 
 @pytest.mark.parametrize("requests, everywhere, raised", [
-    # In each read a part that merely failed stands before the one at the limit: the limit decides.
+    # A part that merely failed stands before the one at the limit, and the whole read is at the limit: it decides.
     ({"1-1": {"fail": "error sending request"}, "1-2": {"fail": "ERROR: You've hit your usage limit. Try again in 3 hours."},
-      "2-1": {"fail": "error sending request"}, "2-2": {"fail": "ERROR: You've hit your usage limit. Try again in 3 hours."}},
-     None, ChatGptWebRateLimit),
+      "2": {"fail": "ERROR: You've hit your usage limit. Try again in 3 hours."}}, None, ChatGptWebRateLimit),
     ({}, _MODEL_GONE[0], ChatGptWebModelMismatch),
 ], ids=["usage limit", "model gone"])
 def test_a_usage_limit_or_a_model_that_is_gone_leaves_a_read_in_parts_as_it_leaves_a_whole_read(
         codex, tmp_path, monkeypatch, requests, everywhere, raised):
     monkeypatch.delenv("ROKID_CODEX_READS", raising=False)
-    _parts(monkeypatch, 2, requests)
+    _parts(monkeypatch, 2, requests, starts=[1, 3])
     if everywhere:
         monkeypatch.setenv("FAKE_CODEX_FAIL", everywhere)
     with pytest.raises(ChatGptWebError) as error:
@@ -1990,15 +2298,15 @@ def test_a_usage_limit_or_a_model_that_is_gone_leaves_a_read_in_parts_as_it_leav
     assert type(error.value) is raised
 
 
-def test_a_read_one_of_whose_parts_hangs_behind_a_finished_read_is_cut_and_the_finished_read_answers_alone(
+def test_a_read_one_of_whose_parts_hangs_behind_the_finished_whole_read_is_cut_and_that_read_answers_alone(
         codex, tmp_path, monkeypatch, capsys):
-    """The wait behind a finished read is for the other read, whatever it is made of: one part that hangs holds
-    nobody longer than a whole read that hangs."""
     monkeypatch.delenv("ROKID_CODEX_READS", raising=False)
-    first, second = {"questions": [_item(1, "④", [1])]}, {"questions": [_item(2, "②", [3])]}
-    _parts(monkeypatch, 2, {"1-1": first, "1-2": second, "2-1": first, "2-2": {**second, "sleep": 120}})
+    _parts(monkeypatch, 2, {"1-1": {"questions": [_item(1, "④", [1])]},
+                            "1-2": {"questions": [_item(2, "②", [3])], "sleep": 120},
+                            # The whole read is back after the parts have started: one of them has ended by then.
+                            "2": {**_BOTH, "sleep": 4}}, starts=[1, 3])
     monkeypatch.setenv("ROKID_CODEX_TIMEOUT_S", "30")
-    monkeypatch.setattr(codex_cli, "_SECOND_READ_LEAST_S", 0.5)
+    monkeypatch.setattr(codex_cli, "_SECOND_READ_MOST_S", 0.5)
     started = time.monotonic()
     replies = codex_cli.CodexCliSolver().answer_all(question=_booklet(tmp_path, pages=4))
 
@@ -2007,18 +2315,33 @@ def test_a_read_one_of_whose_parts_hangs_behind_a_finished_read_is_cut_and_the_f
     assert [result.extras.get("read_once") for _, result in replies] == [True, True]
     printed = capsys.readouterr().out
     assert len(_events(printed, "codex_read_cut")) == 1
-    assert [line["read"] for line in _events(printed, "codex_read_done")] == [1]
-    assert sorted(call["reply_file"] for call in _runs(codex())) == [
-        "reply-1-1.json", "reply-1-2.json", "reply-2-1.json"], "the part that hung never ended by itself"
+    assert [line["read"] for line in _events(printed, "codex_read_done")] == [2]
+    assert sorted(call["reply_file"] for call in _runs(codex())) == ["reply-1-1.json", "reply-2.json"], (
+        "the part that hung never ended by itself")
 
 
-def test_in_parts_the_first_whole_read_is_handed_over_once_and_the_compared_answers_follow(
+def test_the_whole_read_behind_a_read_in_parts_is_waited_for_longer_than_that_read_took(
+        codex, tmp_path, monkeypatch, capsys):
+    """A read in parts is back in a fraction of the time the whole read takes. Waited for only as long again as
+    the first read took, the whole read would be ended every time and nothing would ever be compared."""
+    monkeypatch.delenv("ROKID_CODEX_READS", raising=False)
+    monkeypatch.setattr(codex_cli, "_SECOND_READ_LEAST_S", 0.2)
+    _parts(monkeypatch, 2, {"1-1": {"questions": [_item(1, "④", [1])]}, "1-2": {"questions": [_item(2, "②", [3])]},
+                            "2": {**_BOTH, "sleep": 8}}, starts=[1, 3])
+    replies = codex_cli.CodexCliSolver().answer_all(question=_booklet(tmp_path, pages=4))
+
+    printed = capsys.readouterr().out
+    assert not _events(printed, "codex_read_cut")
+    assert [line["read"] for line in _events(printed, "codex_read_done")] == [1, 2]
+    assert [result.extras.get("read_once") for _, result in replies] == [None, None], "both reads were compared"
+
+
+def test_in_parts_the_first_read_is_handed_over_whole_and_once_and_the_compared_answers_follow(
         codex, tmp_path, monkeypatch, capsys):
     monkeypatch.delenv("ROKID_CODEX_READS", raising=False)
     _parts(monkeypatch, 2, {"1-1": {"questions": [_item(1, "④", [1])]},
                             "1-2": {"questions": [_item(2, "②", [3])], "sleep": 1.5},
-                            "2-1": {"questions": [_item(1, "④", [1])], "sleep": 5},
-                            "2-2": {"questions": [_item(2, "③", [3])], "sleep": 5}})
+                            "2": {"questions": [_item(1, "④", [1]), _item(2, "③", [3])], "sleep": 5}}, starts=[1, 3])
     handed = _Handed()
     began = time.monotonic()
     replies = codex_cli.CodexCliSolver().answer_all(question=_booklet(tmp_path, pages=4, on_first_read=handed))
@@ -2026,17 +2349,16 @@ def test_in_parts_the_first_whole_read_is_handed_over_once_and_the_compared_answ
 
     [(at, early)] = handed.calls
     assert at - began >= 1.5, "not before the last part of that read was back"
-    assert returned - at > 1.5, "while the other read was still running"
-    assert _shown(early) == [([1], "④", "ready", ""), ([2], "②", "ready", "")], "a whole read, not a part"
+    assert returned - at > 1.5, "while the whole read was still running"
+    assert _shown(early) == [([1], "④", "ready", ""), ([2], "②", "ready", "")], "a whole read's answers, not a part's"
     assert [result.extras.get("read_once") for _, result in early] == [True, True]
     one, two = _shown(replies)
     assert one == ([1], "④", "ready", "") and two[:3] == ([2], "②", "ready") and "③" in two[3]
     assert _same_questions(early, replies)
     printed = capsys.readouterr().out
     parts = _events(printed, "codex_part_done")
-    assert sorted((line["read"], line["part"], line["pages"]) for line in parts) == [
-        (1, 1, "1-2"), (1, 2, "3-4"), (2, 1, "1-2"), (2, 2, "3-4")]
+    assert sorted((line["read"], line["part"], line["pages"]) for line in parts) == [(1, 1, "1-2"), (1, 2, "3-4")]
     done = {line["read"]: line for line in _events(printed, "codex_read_done")}
     assert sorted(done) == [1, 2] and all(set(line) == {"event", "read", "seconds"} for line in done.values())
-    assert all(done[line["read"]]["seconds"] >= line["seconds"] for line in parts), "a read ends with its last part"
+    assert all(done[1]["seconds"] >= line["seconds"] for line in parts), "a read ends with its last part"
     assert done[1]["seconds"] >= 1.5 and done[2]["seconds"] >= 5.0

@@ -32,7 +32,7 @@ from PIL import Image, UnidentifiedImageError
 from pydantic import BaseModel, ConfigDict, StrictInt, StrictStr, validator
 from starlette.concurrency import run_in_threadpool
 
-from . import config, db, page_clips, retention
+from . import codex_update, config, db, page_clips, retention
 from .audio_formats import safe_audio_suffix
 from .analyzers import get_analyzer
 from .answer_text import to_display_answer
@@ -873,6 +873,8 @@ def get_settings() -> dict:
         "input": build_input_contract(),
         "providers": provider_status(),
         "route_check": last_route_check(),
+        # The Codex CLI's release and when a newer one was last looked for; null where it is not kept up by itself.
+        "codex_update": codex_update.state(),
         "route_failure": last_route_failure(),
         "versions": version_info(),
     }
@@ -3332,6 +3334,24 @@ def route_check_due(*, now: float, interval: float, deep: bool = False) -> bool:
     return interval > 0 and (last is None or now - (at if isinstance(at, (int, float)) else 0) >= interval)
 
 
+def _update_codex() -> None:
+    """One attempt to bring the Codex CLI to its newest stable release, when the host is set to keep it there
+    (ROKID_CODEX_AUTO_UPDATE=1) and the night's hours have come (app/codex_update.py). Never raises: the thread
+    that calls it also checks the routes every day."""
+    if os.environ.get("ROKID_CODEX_AUTO_UPDATE") != "1" or not codex_update.due(time.time()):
+        return
+    try:
+        from .solvers import codex_cli
+
+        result = codex_update.update(command=codex_cli._command(),
+                                     verify=lambda binary: codex_cli.CodexCliSolver.verify([binary]))
+        print(json.dumps({"event": "codex_update", **result}), flush=True)
+        if result.get("result") == "updated":
+            run_route_check()  # what the chooser shows is of the release now in use
+    except Exception as error:  # noqa: BLE001
+        print(json.dumps({"event": "codex_update_failed", "type": type(error).__name__}), flush=True)
+
+
 def _route_check_daily(stopping: threading.Event) -> None:
     """Once a day, so a route that stopped is known before the day of use (ROKID_ROUTE_CHECK_INTERVAL_S; 0 is off).
 
@@ -3342,6 +3362,7 @@ def _route_check_daily(stopping: threading.Event) -> None:
     """
     interval = float(os.environ.get("ROKID_ROUTE_CHECK_INTERVAL_S") or 86400)
     while interval > 0 and not stopping.wait(300):
+        _update_codex()
         deep = os.environ.get("ROKID_ROUTE_CHECK_DEEP") == "1"
         if _booklet_routes() and route_check_due(now=time.time(), interval=interval, deep=deep):
             run_route_check(deep=deep)

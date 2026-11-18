@@ -118,6 +118,8 @@ what the platform permits.
 
 - `docs/model-effort-research-2026-11-16.md` — モデルとエフォートの外部調査（2026-11-16、調査記録。Codex CLI と Work で共通に使うモデル・エフォート・速度、画像の縮小と上限、使用量の仕組みを一次資料から。見つからなかったものは「not found」と明記）。
 
+- `docs/codex-limits-and-updates-research-2026-11-18.md` — Codex CLI の制限・エラー・画像・更新の外部調査（2026-11-18、調査記録。プランごとの使用量の枠と数え方、12 月からの共通化、上限と回数制限（429）で CLI が出す文言と再試行、1 回の依頼の画像の上限と CLI の縮小、CLI が新しい版とモデルを知る仕組み、リリースの間隔を、公式資料と `openai/codex` の `rust-v0.170.0` のソースから。実サービスでは何も試していない。見つからなかったものは「not found」と明記）
+
 - `docs/whole-review-2026-11-14.md` — 全体の見直し（現行の調査記録、実機は動かしていない）。一度も確かめていないこと、
   使用の順の問題（A〜F）、本人の要望の全件と現状、記録の食い違い、次の順番の提案。
 - `docs/superpowers/specs/2026-11-12-wearer-led-capture-design.md` — 撮影方式の設計提案
