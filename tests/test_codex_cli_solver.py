@@ -489,7 +489,7 @@ def test_a_run_tells_the_proxy_how_long_it_may_take(codex, tmp_path, monkeypatch
     monkeypatch.setattr(codex_cli, "name_resolving_proxy", proxy)
     codex_cli.CodexCliSolver().answer_all(question=_booklet(tmp_path, pages=20))
 
-    assert asked == [1300.0], "300 s and 50 s a page: twenty pages may take longer than the 600 s a tunnel was kept"
+    assert asked == [2700.0], "the tunnel is kept as long as the run may take"
 
 
 FLOW = r'''
@@ -570,9 +570,10 @@ def test_a_run_that_hangs_gives_the_booklet_up_in_minutes_by_its_size(monkeypatc
 
     monkeypatch.delenv("ROKID_CODEX_TIMEOUT_S", raising=False)
     # (seconds for the answers, seconds for finding the pages)
-    assert codex_cli._time_allowed(8) == (900.0, 120.0)
-    assert codex_cli._time_allowed(20) == (1300.0, 180.0)
-    assert codex_cli._time_allowed(47) == (2650.0, 342.0)
+    assert codex_cli._time_allowed(8) == (2700.0, 120.0)
+    assert codex_cli._time_allowed(20) == (2700.0, 180.0)
+    assert codex_cli._time_allowed(47) == (2700.0, 342.0)
+    assert codex_cli._time_allowed(60) == (3300.0, 420.0)
     monkeypatch.setenv("ROKID_CODEX_TIMEOUT_S", "90")
     assert codex_cli._time_allowed(47) == (90.0, 90.0)
 
@@ -585,7 +586,9 @@ def test_twelve_dense_pages_are_not_given_up_at_ten_minutes(monkeypatch):
 
     monkeypatch.delenv("ROKID_CODEX_TIMEOUT_S", raising=False)
     answers, _ = codex_cli._time_allowed(12)
-    assert answers >= 900.0
+    # A backstop, not a budget: no run on record ever hung, and the two that were ended as hung were slow ones
+    # whose work was thrown away with nothing behind them that could answer inside the test's time.
+    assert answers >= 2700.0
 
 
 def test_with_sending_off_the_route_reports_it_and_runs_nothing(tmp_path):
@@ -1280,8 +1283,8 @@ def test_a_read_that_hangs_behind_a_finished_one_is_cut_and_the_finished_read_an
 def test_a_slow_first_read_does_not_buy_the_other_as_long_again_without_end(codex, tmp_path, monkeypatch, capsys):
     """The operator's use of 2026-11-18: one read of twelve dense pages came back after some nine minutes. As long
     again for the other is most of what is left of a 50-minute test. The wait behind a finished read has a ceiling
-    (four minutes: the two runs of 47 pages lay 220 s apart)."""
-    assert codex_cli._SECOND_READ_MOST_S == 240.0
+    (fifteen minutes since the first read's answers go out at once: waiting behind it costs the wearer nothing)."""
+    assert codex_cli._SECOND_READ_MOST_S == 900.0
     _twice(monkeypatch, _read((1, "④")), _read((1, "④")))
     monkeypatch.setenv("ROKID_CODEX_LOCATE", "0")
     monkeypatch.setenv("FAKE_CODEX_SLEEP", "3")

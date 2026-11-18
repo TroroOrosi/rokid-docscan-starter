@@ -376,7 +376,13 @@ from __future__ import annotations
 #         for the new-chat page first (it stopped twice on the daily check's chat). Chat's attach budget grows with
 #         the files' size (29 MB were not confirmed in 200 s, twice) and an unconfirmed upload logs how far it got.
 #         Unit tests only: none of it seen with the model or on the live pages.
-APP_VERSION = "0.87.0"
+# 0.88.0: the same day, after the operator's word that the second booklet was given up for time. The answers go
+#         out when the first of the two reads is back (one notice item, 照合中, says the comparison is still
+#         running); the compared answers follow over the same questions. The Codex CLI and Work ask for GPT-6.2
+#         Sol (released 2026-11-17; the operator's decision, no comparison). Chat counts an uploaded file that the
+#         product renamed with the time of its upload (twelve pages stood uploaded and ten were counted: the
+#         cause of that morning's Chat failure, reproduced and then passed on the live page). See API 1.53.0.
+APP_VERSION = "0.88.0"
 
 # HTTP API envelope. Path prefix stays "/v1" until a breaking envelope change.
 # 1.2.0: /match responses gained the additive `ocr_similarity` field.
@@ -531,7 +537,12 @@ APP_VERSION = "0.87.0"
 #         deck and with the send gate off, the bundle's 409 says "sending is not authorized". `/v1/route-check`
 #         and `/v1/settings` carry `deep_checked_at` once a check has sent through the browser. With
 #         ROKID_UNNAMED_PAGES_NOTICE=1 (off) the bundle names captured pages no answer cites (`pages-unanswered`).
-API_VERSION = "1.52.0"
+# 1.53.0: while the second of two reads is still running the answer bundle ends with the item `read-comparing`
+#         (照合中, needs_review); a later revision carries the compared answers over the same question ids, may add
+#         a question only the second read listed, and drops that item (or ends with `read-once`). A client has
+#         to take a newer snapshot whose list of questions grew or shrank around the ones it holds (glassdoc
+#         0.44.18; an older one refuses it and is notified again every five seconds).
+API_VERSION = "1.53.0"
 
 # Matching algorithm identity. Bump when thresholds or hashing change so a
 # re-index/eval is triggered. Mirrors thresholds in app/matching.py.

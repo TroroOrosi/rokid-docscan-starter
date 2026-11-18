@@ -533,7 +533,12 @@ def _time_allowed(pages: int) -> tuple[float, float]:
     at least. ROKID_CODEX_TIMEOUT_S names another limit.
     """
     named = os.environ.get("ROKID_CODEX_TIMEOUT_S")
-    answers = float(named) if named else max(900.0, 300.0 + 50.0 * pages)
+    # A backstop from 0.88.0 (the same day): no run on record ever hung. The two that were ended as hung (fourteen
+    # dark pages on 2026-11-16, twelve of vertical Japanese on 2026-11-18) were slow, their work was thrown away, and
+    # nothing behind this route answers such a booklet sooner (Chat thought for over half an hour on the same twelve
+    # pages). 45 minutes, or the old measure where that is longer. What ends a run that really stalls is not built:
+    # it needs the CLI's events (--json) and how often they come during a long read, which is not on record.
+    answers = float(named) if named else max(2700.0, 300.0 + 50.0 * pages)
     return answers, min(answers, max(120.0, 60.0 + 6.0 * pages))
 
 
@@ -543,7 +548,9 @@ def _time_allowed(pages: int) -> tuple[float, float]:
 # answered, and its booklet is then read once, with nothing compared. The ceiling is for a first read that was slow
 # itself (nine minutes for twelve dense pages, 2026-11-18): as long again is most of what a 50-minute test has left.
 _SECOND_READ_LEAST_S = 120.0
-_SECOND_READ_MOST_S = 240.0
+# 240 s until the first read's answers went out at once (0.88.0): from then on the wait costs the wearer nothing,
+# and a read cut is a booklet nothing was compared for.
+_SECOND_READ_MOST_S = 900.0
 
 
 def _command() -> list[str]:
