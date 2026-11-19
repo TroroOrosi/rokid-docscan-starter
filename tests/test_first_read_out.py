@@ -71,30 +71,31 @@ def ids(items):
     return [item["question_id"] for item in items]
 
 
-def test_the_first_reads_answers_are_out_while_the_other_read_runs_and_say_that_the_comparison_is_to_come(client, monkeypatch):
+def test_the_first_reads_answers_are_out_while_the_other_read_runs_and_the_bundle_says_that_it_compares(client, monkeypatch):
     one, two = question("問1", 1), question("問2", 2)
     cli = Cli(once([(one, answer(one, "④")), (two, answer(two, "②"))]), [(one, answer(one, "④")), (two, answer(two, "②"))])
     booklet(client, monkeypatch, cli, BrowserReply(), Chat())
 
-    assert shown(cli.early["items"][:-1]) == [("問1", "ready", "④"), ("問2", "ready", "②")]
-    notice = cli.early["items"][-1]
-    assert (notice["question_id"], notice["question_label"], notice["status"]) == ("read-comparing", "照合中", "needs_review")
-    assert notice["answer"] == "（もう1回の読みを待っています）" and notice["issue"].strip()
+    # Nothing but the answers: until 2026-11-19 an item 照合中 stood behind them, and the operator asked for answers
+    # without explanations. That the comparison is to come is a mark of the bundle (the glasses show "…").
+    assert shown(cli.early["items"]) == [("問1", "ready", "④"), ("問2", "ready", "②")]
+    assert cli.early["comparing"] is True
     # The watcher wakes the glasses for it exactly as for a finished booklet.
     assert cli.early["available_stage"] == "complete"
     assert cli.state["answer_ready"] is True and cli.state["answer_revision"] == cli.early["revision"]
 
 
-def test_the_compared_answers_replace_them_under_the_same_questions_and_the_notice_goes(client, monkeypatch):
+def test_the_compared_answers_replace_them_under_the_same_questions_and_the_mark_goes(client, monkeypatch):
     one, two = question("問1", 1), question("問2", 2)
     cli = Cli(once([(one, answer(one, "④")), (two, answer(two, "②"))]),
-              [(one, answer(one, "④")), (two, answer(two, "②", review_note="2回の読みで不一致。他方：③"))])
+              [(one, answer(one, "④")), (two, answer(two, "②", review_note="2回の読みで不一致。他方：③", other_answer="③"))])
     _, session = booklet(client, monkeypatch, cli, BrowserReply(), Chat())
 
     late = bundle(client, session)
     assert shown(late["items"]) == [("問1", "ready", "④"), ("問2", "needs_review", "②")]
-    assert "③" in late["items"][1]["issue"]
-    assert ids(late["items"]) == ids(cli.early["items"][:-1]), "the same questions: the glasses update in place"
+    assert late["items"][1]["other"] == "③", "the other read's answer, for the glasses to show beside this one"
+    assert "other" not in late["items"][0] and "comparing" not in late
+    assert ids(late["items"]) == ids(cli.early["items"]), "the same questions: the glasses update in place"
     assert late["revision"] > cli.early["revision"], "a newer revision: the watcher notifies again"
     assert cli.calls == 1
 
@@ -108,7 +109,7 @@ def test_a_question_only_the_second_read_listed_is_added_where_the_comparison_pu
 
     late = bundle(client, session)
     assert shown(late["items"]) == [("問1", "ready", "④"), ("問2", "needs_review", "②"), ("問3", "ready", "①")]
-    before = ids(cli.early["items"][:-1])
+    before = ids(cli.early["items"])
     assert [late["items"][0]["question_id"], late["items"][2]["question_id"]] == before
     assert late["items"][1]["question_id"] not in before
     assert {item["group_label"] for item in late["items"]} == {"第1問"}
@@ -126,7 +127,7 @@ def test_an_added_question_never_takes_the_answer_of_a_section_answered_whole_ou
     late = bundle(client, session)
     assert [(item["group_label"], *row) for item, row in zip(late["items"], shown(late["items"]))] == [
         ("第1問", "問1", "ready", "ア"), ("第1問", "問2（第2問）", "needs_review", "イ"), ("第2問", "全問", "ready", "全体の答え")]
-    before = ids(cli.early["items"][:-1])
+    before = ids(cli.early["items"])
     assert [item["question_id"] for item in late["items"] if item["question_id"] in before] == before
 
 
@@ -137,24 +138,23 @@ def test_an_answer_only_the_second_read_gave_goes_under_the_question_the_first_r
                (two, answer(two, "②", review_note="2回のうち1回は解答なし"))])
     _, session = booklet(client, monkeypatch, cli, BrowserReply(), Chat())
 
-    assert [(item["status"], item["answer"]) for item in cli.early["items"][:-1]] == [("needs_input", ""), ("failed", "")]
+    assert [(item["status"], item["answer"]) for item in cli.early["items"]] == [("needs_input", ""), ("failed", "")]
     late = bundle(client, session)
     assert [(item["status"], item["answer"]) for item in late["items"]] == [("needs_review", "④"), ("needs_review", "②")]
-    assert ids(late["items"]) == ids(cli.early["items"][:-1])
+    assert ids(late["items"]) == ids(cli.early["items"])
     # The glasses refuse a question whose printed answer numbers change: each keeps what it was first shown with.
-    assert [item.get("answer_no") for item in late["items"]] == [item.get("answer_no") for item in cli.early["items"][:-1]]
+    assert [item.get("answer_no") for item in late["items"]] == [item.get("answer_no") for item in cli.early["items"]]
 
 
-def test_when_the_second_read_gave_nothing_the_notice_says_that_nothing_was_compared(client, monkeypatch):
+def test_when_the_second_read_gave_nothing_the_mark_goes_under_a_revision_of_its_own(client, monkeypatch):
     one = question("問1", 1)
     first = once([(one, answer(one, "④"))])
     cli = Cli(first, once([(one, answer(one, "④"))]))
     _, session = booklet(client, monkeypatch, cli, BrowserReply(), Chat())
 
     late = bundle(client, session)
-    assert shown(late["items"][:-1]) == [("問1", "ready", "④")]
-    assert (late["items"][-1]["question_id"], late["items"][-1]["question_label"]) == ("read-once", "照合なし")
-    assert ids(late["items"][:-1]) == ids(cli.early["items"][:-1]) and late["revision"] > cli.early["revision"]
+    assert shown(late["items"]) == [("問1", "ready", "④")] and "comparing" not in late
+    assert ids(late["items"]) == ids(cli.early["items"]) and late["revision"] > cli.early["revision"]
 
 
 def test_a_route_that_fails_after_its_first_read_is_out_has_answered_and_no_other_route_is_asked(client, monkeypatch):
@@ -165,8 +165,8 @@ def test_a_route_that_fails_after_its_first_read_is_out_has_answered_and_no_othe
     _, session = booklet(client, monkeypatch, cli, work, chat)
 
     late = bundle(client, session)
-    assert shown(late["items"][:-1]) == [("問1", "ready", "④")]
-    assert late["items"][-1]["question_label"] == "照合なし", "the comparison will not come: said, not waited for"
+    assert shown(late["items"]) == [("問1", "ready", "④")]
+    assert "comparing" not in late, "the comparison will not come: the mark goes, it is not waited for"
     assert late["revision"] > cli.early["revision"], "nothing was saved again, and the glasses still have to be told"
     assert (cli.calls, work.calls, chat.questions) == (1, [], [])
 

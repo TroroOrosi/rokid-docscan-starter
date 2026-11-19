@@ -421,7 +421,20 @@ from __future__ import annotations
 #         same request as before. On the phone the wait between "answer this booklet" and the first request for
 #         answers went from 29-36 s to 9.8 s (one booklet). (3) A gathered page is saved grey, as it is. No HTTP
 #         schema or behaviour changes: API stays 1.55.0.
-APP_VERSION = "0.91.0"
+# 0.92.0: the operator, after two subjects on 2026-11-19: the answers and the retake were not rational, and a page
+#         to take again has to be found before GPT asks for it. (1) POST /v1/documents/{id}/capture-check: when
+#         the wearer has ended the capture the phone names the recorded pages that are not whole (a clip that
+#         failed or never came, or one gathered from fewer than 40 frames: 12 of the 14 such pages on record were not
+#         read), and the glasses take them again in place before anything is finalized or sent. No measure taken
+#         from a page's picture told the read pages from the others, so nothing else is asked here. (2) The answer
+#         bundle carries nothing but the paper's questions: the items 照合中, 照合なし, 縮小 and "N頁" are gone;
+#         `comparing`, `retake` (the captures to take again) and an item's `other` (the other read's answer) say
+#         what they said. (3) Two reads that differ only in form agree: each box under its printed name against
+#         the bare values, a value in brackets, the boxes' letters against answer numbers; a two-digit label both
+#         reads agree on carries no note. (4) POST /v1/exam-sessions/{id}/retake: pages taken again after the
+#         answers were read take their pages' places, the booklet is read again whole, the answers go over the
+#         questions that were shown, and an answer the wearer already had is marked `seen`.
+APP_VERSION = "0.92.0"
 
 # HTTP API envelope. Path prefix stays "/v1" until a breaking envelope change.
 # 1.2.0: /match responses gained the additive `ocr_similarity` field.
@@ -587,7 +600,12 @@ APP_VERSION = "0.91.0"
 #         nearer its limit when the service names two.
 # 1.55.0: the answer bundle may carry the item `pages-reduced` (縮小, needs_review) before the item about the
 #         reads: the booklet was more than one request holds and no read saw every page at its own size.
-API_VERSION = "1.55.0"
+# 1.56.0: POST /v1/documents/{id}/capture-check ({"retake": [page numbers]}) and POST
+#         /v1/exam-sessions/{id}/retake. The answer bundle: no item of group `pages` but the optional
+#         `pages-unanswered`; optional top-level `comparing` (true) and `retake` (capture numbers from 1, at most
+#         100); optional item fields `other` (at most 200 characters, with needs_review) and `seen` (true). While
+#         a booklet is read again after a retake the bundle answers 409 "the answers are being made".
+API_VERSION = "1.56.0"
 
 # Matching algorithm identity. Bump when thresholds or hashing change so a
 # re-index/eval is triggered. Mirrors thresholds in app/matching.py.
@@ -771,7 +789,18 @@ EXPLAINER_API_VERSION = "1.1.0"
 # 1.52.0: during capture a bar stands outside each side of the small window past which the paper runs out of
 # the camera's view, and beside the review of the page taken that way: what is printed beyond that side is
 # not in the picture. The thick frame that said "too near" (glassdoc 0.44.7) is gone: its rule did not hold.
-GLASSES_VIEW_CONTRACT_VERSION = "1.52.0"
+# 1.53.0 (glassdoc 0.44.20): the answers are shown without explanations. The certain answers come first, packed;
+# then one screen 再撮影 with the numbers of the captures to take again, when there are any; then the answers that
+# are not certain, each as ？label answer｜the other read's answer; then the answers the wearer already had
+# before pages were taken again. A question without an answer for want of material is not shown: its page is
+# among those to take again. The index row ends with … while a second read is being compared. Paging goes round:
+# past the last screen comes the first. With pages to take again a double tap on the answers takes them (the
+# capture comes back, the number above the small window is 再N, the page's own number); a second double tap before
+# any page is taken ends the writing. When the phone finds pages not whole right after the end of a capture, the
+# same numbers come up before anything is sent. A tap that clears the display during a recording drops a clip that
+# has not yet the still frames of a page; the page is recorded again on return. The display no longer lights when
+# only the reading's number becomes known behind it.
+GLASSES_VIEW_CONTRACT_VERSION = "1.53.0"
 
 # Answer-area overlay payload (box + short answer; 2D image-anchored).
 # 1.1.0: added tracking metadata (tracking/fixed_ar/anchor_hint).

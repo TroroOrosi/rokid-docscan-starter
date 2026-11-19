@@ -1,7 +1,7 @@
-"""Two things the server says or does by itself behind a booklet.
+"""What the server does by itself behind a booklet.
 
-A booklet two reads were asked for and one answered alone says so once behind its answers: an unmarked answer otherwise
-means that two reads agree, and nothing told the two apart (found 2026-11-17).
+Until 2026-11-19 a booklet one read answered alone, and one whose pages had been reduced, each said so in an item
+behind its answers. The operator asked for answers without explanations that day: the bundle carries no such item.
 
 The clips' sweep (app/retention.py) runs at a start and after a booklet is finalized: nothing else removes a clip, and
 nobody is at the phone.
@@ -37,13 +37,9 @@ def items(client, session):
     return client.get(f"/v1/exam-sessions/{session}/answer-bundle").json()["items"]
 
 
-def test_a_booklet_one_read_answered_alone_says_once_that_nothing_was_compared(client, monkeypatch):
+def test_a_booklet_one_read_answered_alone_carries_its_answers_and_nothing_else(client, monkeypatch):
     _, session = booklet(client, monkeypatch, Cli(once=True), BrowserReply(), None)
-    answers = items(client, session)
-    assert [(item["status"], item["answer"]) for item in answers[:-1]] == [("ready", "4")], "the answer itself stays as it is"
-    notice = answers[-1]
-    assert (notice["question_id"], notice["status"], notice["question_label"]) == ("read-once", "needs_review", "照合なし")
-    assert notice["answer"].strip() and "照合" in notice["issue"], "the glasses refuse a blank answer to review"
+    assert [(item["status"], item["answer"]) for item in items(client, session)] == [("ready", "4")]
 
 
 def test_a_booklet_both_reads_answered_carries_no_such_item(client, monkeypatch):
@@ -51,23 +47,11 @@ def test_a_booklet_both_reads_answered_carries_no_such_item(client, monkeypatch)
     assert [(item["status"], item["answer"]) for item in items(client, session)] == [("ready", "4")]
 
 
-def test_a_booklet_whose_pages_had_to_be_reduced_says_so_once_behind_its_answers(client, monkeypatch):
+def test_a_booklet_whose_pages_had_to_be_reduced_carries_its_answers_and_nothing_else(client, monkeypatch):
     """A booklet too long for one request whose major problems could not be told is read with every page reduced
-    (app/solvers/codex_cli.py). Until 2026-11-18 that happened from about twenty gathered pages on with nothing
-    said. On a page with a known text the model read characters of nine pixels as it read them at twenty-five and
-    worse at six (M-44 (20)): what is small on the paper is what to check."""
-    _, session = booklet(client, monkeypatch, Cli(once=False, reduced=True), BrowserReply(), None)
-    answers = items(client, session)
-    assert [(item["status"], item["answer"]) for item in answers[:-1]] == [("ready", "4")], "the answer itself stays as it is"
-    notice = answers[-1]
-    assert (notice["question_id"], notice["status"], notice["question_label"]) == ("pages-reduced", "needs_review", "縮小")
-    assert notice["answer"].strip() and "縮小" in notice["issue"] and "小さい字" in notice["issue"]
-
-
-def test_reduced_pages_and_one_read_are_each_said_and_the_read_stays_last(client, monkeypatch):
-    """The item about the reads is the one a later revision replaces: it stays where the glasses know it."""
+    (app/solvers/codex_cli.py); the mark stays with the answers on the server (the log and the record say it)."""
     _, session = booklet(client, monkeypatch, Cli(once=True, reduced=True), BrowserReply(), None)
-    assert [item["question_id"] for item in items(client, session)[-2:]] == ["pages-reduced", "read-once"]
+    assert [(item["status"], item["answer"]) for item in items(client, session)] == [("ready", "4")]
 
 
 def test_the_clips_sweep_runs_after_a_booklet_is_finalized(client, monkeypatch):

@@ -348,7 +348,7 @@ def _await_answers(server: Server, session: int, since: float, timeout: float) -
     A 409 says the answers are still being made, and a call without an answer is asked again. Only counts leave here.
     """
     found = {"http": None, "detail": None, "first_s": None, "complete_s": None, "items": {}, "answered": 0,
-             "pages_left_as_one_frame": [], "revision": None}
+             "pages_left_as_one_frame": [], "retake": [], "revision": None}
     deadline = time.monotonic() + timeout
     while True:
         status, bundle = server.call("GET", f"/v1/exam-sessions/{session}/answer-bundle")
@@ -356,9 +356,9 @@ def _await_answers(server: Server, session: int, since: float, timeout: float) -
         if status == 200:
             items = bundle.get("items") or []
             found["items"] = dict(Counter(str(item.get("status")) for item in items))
-            # The server's own notices stand in the group "pages"; "page3" is a recorded page that stayed one frame.
-            found["pages_left_as_one_frame"] = sorted(
-                int(named[1]) for item in items if (named := re.fullmatch(r"page(\d+)", str(item.get("question_id")))))
+            # The captures the answers ask to be taken again (from Server 0.92.0; until then an item "page3" each):
+            # a recorded page that stayed one frame is among them, and so is the page of a question left open.
+            found["retake"] = sorted(page for page in bundle.get("retake") or [] if type(page) is int)
             found["answered"] = sum(1 for item in items
                                     if item.get("group_id") != "pages" and item.get("status") in ("ready", "needs_review"))
             now = round(time.monotonic() - since, 1)
@@ -532,6 +532,7 @@ def replay(booklet: dict, server: Server, *, pace: str = "recorded", timeout: fl
             watch.stop()
         state("closed")  # the replay's wearer is gone: a restart of the target does not take its session up for them
     # Each clip as the server held it when the booklet went on (the watch's last look was right behind finalize).
+    # (Below, once every clip's state is known: which of the pages to take again are recorded pages left one frame.)
     for row in report["clips"]:
         index = row["page"] - 1
         seen = watch.rows.get(index, {}) if index in arrived else {"status": row.get("status", "refused")}
@@ -553,6 +554,9 @@ def replay(booklet: dict, server: Server, *, pace: str = "recorded", timeout: fl
 def _judge(report: dict) -> list[dict]:
     """The four named checks, each PASS or FAIL with what it saw."""
     finalize, answers, stopped = report["finalize"], report["answers"], report["stopped_at"]
+    if answers:
+        undone = {row["page"] for row in report["clips"] if row.get("status") != "done"}
+        answers["pages_left_as_one_frame"] = sorted(page for page in answers.get("retake") or [] if page in undone)
     most = round((1 - WAIT_MARGIN) * finalize["limit_s"], 1) if finalize else None
     halt = f"the replay stopped at {stopped['step']} (HTTP {stopped['http']})" if stopped else None
     not_done = [f"page {row['page']}: {row.get('status')}" + (f" ({row['reason']})" if row.get("reason") else "")

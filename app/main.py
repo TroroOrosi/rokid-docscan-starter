@@ -465,6 +465,26 @@ def capture_inspection_status(inspection_id: str | None, device_id: str, generat
         raise HTTPException(status_code=503, detail="capture inspection unavailable") from None
 
 
+# What the watcher's poll last found for a booklet whose answers are complete: session -> (what that hangs on, the
+# stage, the revision). The poll comes twice a second for as long as the wearer waits or reads, and each one built the
+# whole bundle again (on the phone at rest, 2026-11-19: 6% of a core). In memory: after a start it is built once more.
+_settled_polls: dict[int, tuple] = {}
+
+
+def _settled_key(session_id: int) -> tuple | None:
+    """What a complete booklet's answers hang on, in one cheap look: the newest answer, the reading's status and
+    stage, a retake, and whether a comparison is under way. None for a reading that does not exist."""
+    try:
+        with closing(db.connect()) as conn:
+            row = conn.execute(
+                "SELECT e.status, e.analysis_stage, e.retake_json, (SELECT MAX(s.id) FROM solutions s JOIN questions q "
+                "ON q.id = s.question_id WHERE q.session_id = e.id) FROM exam_sessions e WHERE e.id = ?",
+                (session_id,)).fetchone()
+    except sqlite3.Error:
+        return None
+    return None if row is None else (*tuple(row), session_id in _comparing)
+
+
 @app.get("/v1/glasses/state")
 def glasses_status(device_id: str | None = None) -> dict:
     try:
@@ -480,18 +500,31 @@ def glasses_status(device_id: str | None = None) -> dict:
     ready = False
     available, revision = "none", 0
     if state["phase"] in ("analyzing", "waiting", "reading") and state["session_id"] is not None:
-        try:
-            # Also resumes a pre-send failure on the phone, without glasses polling.
-            # Asked twice a second by the watcher: the answers' state only, without hashing every page file.
-            bundle = _answer_snapshot(state["session_id"], identify=False)
-            items = bundle["items"]
-            available = bundle.get("available_stage", "complete" if items and all(
-                item["status"] != "pending" for item in items) else "none")
-            revision = bundle.get("revision", 0)
-            ready = bool(items) and available in ("reading", "complete")
-        except HTTPException as error:
-            if error.status_code not in (404, 409):
-                raise
+        session_id = state["session_id"]
+        key = _settled_key(session_id)
+        kept = _settled_polls.get(session_id)
+        if kept is not None and key is not None and kept[0] == key:
+            # Settled answers, and nothing they hang on has moved since they were last built.
+            ready, available, revision = True, kept[1], kept[2]
+        else:
+            _settled_polls.pop(session_id, None)
+            try:
+                # Also resumes a pre-send failure on the phone, without glasses polling.
+                # Asked twice a second by the watcher: the answers' state only, without hashing every page file.
+                bundle = _answer_snapshot(session_id, identify=False)
+                items = bundle["items"]
+                available = bundle.get("available_stage", "complete" if items and all(
+                    item["status"] != "pending" for item in items) else "none")
+                revision = bundle.get("revision", 0)
+                ready = bool(items) and available in ("reading", "complete")
+                if (ready and available == "complete" and key is not None and key == _settled_key(session_id)
+                        and all(item["status"] in ("ready", "needs_review", "needs_input") for item in items)):
+                    if len(_settled_polls) >= 8:
+                        _settled_polls.clear()
+                    _settled_polls[session_id] = (key, available, revision)
+            except HTTPException as error:
+                if error.status_code not in (404, 409):
+                    raise
     # A writing-done notification may commit while the bundle is being read.
     # Return the newer phase instead of a wake permission for an ended run.
     try:
@@ -1451,18 +1484,19 @@ def get_document_scan_status(
 _GATHER_WAIT_S = 200.0
 
 
-def _await_gathering(document_id: int) -> None:
+def _await_gathering(document_id: int, *, booklet: bool = True) -> None:
     """Wait for this booklet's clips that are stored or being gathered, at most ROKID_GATHER_WAIT_S seconds (200).
 
     Past the limit the booklet goes on with the pages that are done; the others stay the one frame they arrived as and
     the answers name them (``_ungathered_pages``). A clip that never arrived has no row and cannot be waited for. The
     glasses' finalize call reads for four minutes (DocScanApi), so the limit has to stay under that with room for
-    the finalizing itself (a second or two on the phone).
+    the finalizing itself (a second or two on the phone). ``booklet`` False: the pages are handed to the solver as
+    they become final, the booklet as a whole is not (a page of it may yet be taken again, ``capture_check``).
     """
     still = page_clips.waiting(document_id)
     left = len(still)
     if not left:
-        _prepare_ahead(document_id, still, booklet=True)
+        _prepare_ahead(document_id, still, booklet=booklet)
         return
     _prepare_ahead(document_id, still)
     limit = float(os.environ.get("ROKID_GATHER_WAIT_S") or _GATHER_WAIT_S)
@@ -1476,7 +1510,7 @@ def _await_gathering(document_id: int) -> None:
     print(json.dumps({"event": "gather_wait", "document_id": document_id, "seconds": round(time.monotonic() - started, 1),
                       "left": left}), flush=True)
     # Whatever is still waiting stays the frame it arrived as (the gathering finds the booklet closed).
-    _prepare_ahead(document_id, set(), booklet=True)
+    _prepare_ahead(document_id, set() if booklet else page_clips.waiting(document_id), booklet=booklet)
 
 
 def _prepare_ahead(document_id: int, waiting: set[int], *, booklet: bool = False) -> None:
@@ -1505,6 +1539,44 @@ def _prepare_ahead(document_id: int, waiting: set[int], *, booklet: bool = False
     except Exception as error:  # noqa: BLE001 - the booklet is then prepared when its answers are asked for
         print(json.dumps({"event": "prepare_ahead_failed", "document_id": document_id, "type": type(error).__name__}),
               flush=True)
+
+
+# A recorded page gathered from fewer frames than this is taken again. The glasses record until 60 still frames have
+# counted (ClipCamera.Options.targetFrames) and take a clip as enough from 40. Of the recorded pages on record up to
+# 2026-11-19 whose clip failed or gave fewer than 40 frames (14), 12 were not read (tests/test_capture_check.py).
+# ponytail: one number for one frame target; if the glasses' target changes, this goes with it.
+_CHECK_MIN_USED = 40
+
+
+@app.post("/v1/documents/{document_id}/capture-check")
+def capture_check(document_id: int) -> dict:
+    """The pages of a booklet to take again, before it is finalized and before anything is asked of a model.
+
+    The glasses ask when the wearer has ended the capture. The call waits for the booklet's clips as the finalize
+    call does (the same limit) and then names, by their numbers from 1, the recorded pages that are not whole: a clip
+    that failed or never came (the page is the one frame it arrived as) and a page gathered from too few frames. The
+    glasses take those again under the same page numbers and finalize after that. A booklet that takes no more pages
+    is asked for nothing. What a page's picture is like (print cut by the frame, blur) is not judged here: no measure
+    taken from the pages on record told the read ones from the others.
+    """
+    with closing(db.connect()) as conn:
+        document = conn.execute("SELECT status FROM documents WHERE id = ?", (document_id,)).fetchone()
+        if document is None:
+            raise HTTPException(status_code=404, detail="document not found")
+    retake: list[int] = []
+    if document["status"] == "open":
+        _await_gathering(document_id, booklet=False)
+        least = int(os.environ.get("ROKID_CHECK_MIN_USED") or _CHECK_MIN_USED)
+        with closing(db.connect()) as conn:
+            few = {row["page_index"] + 1 for row in page_clips.rows(document_id)
+                   if row["status"] == "done" and (row["used"] or 0) < least}
+            retake = sorted(few | set(_ungathered_pages(conn, document_id)))
+        if not retake:
+            _prepare_ahead(document_id, page_clips.waiting(document_id), booklet=True)
+    with closing(db.connect()) as conn:
+        pages = conn.execute("SELECT COUNT(*) FROM pages WHERE document_id = ?", (document_id,)).fetchone()[0]
+    print(json.dumps({"event": "capture_check", "document_id": document_id, "pages": pages, "retake": retake}), flush=True)
+    return {"document_id": document_id, "pages": pages, "retake": retake}
 
 
 @app.post("/v1/documents/{document_id}/finalize")
@@ -3549,6 +3621,25 @@ def _record_solve_failure(conn, row, error: Exception, *, commit: bool = True,
         conn.commit()
 
 
+# A printed choice as the route answers it since 2026-11-18: its circled label and the option's words in brackets,
+# alone on a line or behind the box's name.
+_CHOICE_LINE = re.compile(r"(?P<head>(?:[^\s：:（）()]{1,8}[：:])?)(?P<label>[①-⑳])（[^（）\n]{1,60}）")
+
+
+def _labels_alone(answer: str) -> str:
+    """A settled choice of one digit, shown as its label alone: the wearer marks the label, and the words take the
+    room of two more answers on a row of the glasses (2026-11-19: the answers of the day's two booklets of choices are
+    96 characters where they were 243, and 152 where they were 416).
+    Only an answer whose every line is such a choice; a label of two digits keeps its words on its line, since soft
+    two-digit labels are misread and the words are what the wearer finds the option by."""
+    lines = answer.split("\n")
+    found = [_CHOICE_LINE.fullmatch(line.strip()) for line in lines]
+    if not all(found):
+        return answer
+    return "\n".join(match["head"] + match["label"] if match["label"] <= "⑨" else line.strip()
+                     for line, match in zip(lines, found))
+
+
 def _answer_bundle_item(conn, group: dict, row) -> dict:
     from .answer_diagrams import validate_diagrams
 
@@ -3620,6 +3711,12 @@ def _answer_bundle_item(conn, group: dict, row) -> dict:
             issue = "。".join(filter(None, ["表示できない要素: " + "、".join(display.unsupported), note]))
     # "問1(2)" keeps question_no unique; the glasses show the printed "問1".
     label = "全問" if group["whole"] else (_printed_label(row) or "全問")
+    if status == "ready":
+        answer = _labels_alone(answer)
+    # What the other of two reads gave where they differ (codex-cli): the glasses show it beside this answer, with
+    # no sentence about it (the operator, 2026-11-19).
+    other = metadata.get("other_answer") if status == "needs_review" else None
+    other = to_display_answer(other.strip()).text[:200] if isinstance(other, str) and other.strip() else ""
     return {
         "group_id": group["id"],
         "group_label": group["label"][:120],
@@ -3628,6 +3725,7 @@ def _answer_bundle_item(conn, group: dict, row) -> dict:
         "answer": answer if status in ("ready", "needs_review") else "",
         "status": status,
         "issue": issue,
+        **({"other": other} if other else {}),
         **({"answer_no": numbers} if numbers else {}),
         **({"diagrams": diagrams} if diagrams else {}),
     }
@@ -4095,12 +4193,75 @@ def _save_compared(conn, session_id: int, doc_id: int, placed: dict[int, int], e
         row = conn.execute("SELECT * FROM questions WHERE session_id = ? ORDER BY id DESC LIMIT 1", (session_id,)).fetchone()
         conn.execute("UPDATE questions SET structure_json = ? WHERE id = ?",
                      (json.dumps({**json.loads(row["structure_json"]), "after": anchor}), row["id"]))
+        placed[id(item)] = row["id"]  # a later saving over the same replies (a booklet read again) finds it there
         if isinstance(result, SolveResult):
             _save_solution(conn, row, result, route, commit=False)
         else:
             _record_solve_failure(conn, row, result or ValueError("no answer for this question"), commit=False)
     conn.commit()
 
+
+def _retake_round(session) -> dict | None:
+    """The last time this booklet's pages were taken again after its answers were read (``exam_retake``); None for a
+    booklet read once. ``mark`` is the newest answer on record when the retake was asked for: what was shown before
+    it. ``state`` is "open" from then until the new reading's answers are saved or that reading has given up."""
+    try:
+        found = json.loads(session["retake_json"] or "null")
+    except (ValueError, TypeError, IndexError, KeyError):
+        return None
+    return found if isinstance(found, dict) and type(found.get("mark")) is int else None
+
+
+def _retake_open(session) -> bool:
+    found = _retake_round(session)
+    return found is not None and found.get("state") == "open"
+
+
+def _retake_close(conn, session_id: int) -> bool:
+    """The new reading has answered, or has given up: the answers are given again. Not committed here."""
+    row = conn.execute("SELECT retake_json FROM exam_sessions WHERE id = ?", (session_id,)).fetchone()
+    found = _retake_round(row) if row is not None else None
+    if found is None or found.get("state") != "open":
+        return False
+    conn.execute("UPDATE exam_sessions SET retake_json = ? WHERE id = ?",
+                 (json.dumps({**found, "state": "done"}), session_id))
+    return True
+
+
+def _placed_again(conn, session_id: int, replies: list, page_count: int) -> dict[int, int]:
+    """id() of a reply's item -> the question row it answers, for a booklet read again after a retake.
+
+    By the printed answer numbers the row was shown with, else by the group and label the row was made from; each
+    row once. A question the new reading names otherwise gets a row of its own (``_save_compared``).
+    """
+    by_numbers: dict[tuple, list[int]] = {}
+    by_text: dict[str, list[int]] = {}
+    for row in (row for group in _answer_groups(conn, session_id) for row in group["items"]):
+        shown = _latest_solution_row(conn, row["id"])
+        try:
+            numbers = tuple(json.loads(shown["answer_metadata_json"] or "{}").get("answer_no") or []) if shown else ()
+        except (ValueError, TypeError, AttributeError):
+            numbers = ()
+        if numbers:
+            by_numbers.setdefault(numbers, []).append(row["id"])
+        by_text.setdefault(row["body_text"] or "", []).append(row["id"])
+    placed: dict[int, int] = {}
+    used: set[int] = set()
+    items = [item for item, _ in replies]
+    for item, labels in zip(items, _model_item_labels(items, page_count)):
+        numbers = tuple(number for number in item.get("answer_no") or [] if type(number) is int)
+        for pool in (by_numbers.get(numbers, []) if numbers else [], by_text.get(" ".join(filter(None, labels)), [])):
+            row_id = next((candidate for candidate in pool if candidate not in used), None)
+            if row_id is not None:
+                placed[id(item)] = row_id
+                used.add(row_id)
+                break
+    return placed
+
+
+# The sessions whose booklet is being read again after a retake by the batch that runs now (_answer_booklet): that
+# batch closes the retake when it ends, whatever came of it (_solve_deck_in_background).
+_resolving: set[int] = set()
 
 # The sessions whose route has shown its first read's answers and is still comparing them with its other read.
 # In memory on purpose: after a restart no comparison is under way, and the booklet then says that nothing was
@@ -4135,8 +4296,13 @@ def _answer_booklet(conn, session, session_id: int, doc_id: int) -> bool:
     if session["exam_type"] == "mixed":
         return _answer_mixed_deck(conn, session, session_id, doc_id)
     items = [row for group in _answer_groups(conn, session_id) for row in group["items"]]
-    if items and all(_latest_solution_row(conn, row["id"]) for row in items):
+    # Pages were taken again after the answers were read (exam_retake): the booklet is read again whole, and its
+    # answers go over the questions the wearer was shown.
+    again = bool(items) and _retake_open(session)
+    if items and all(_latest_solution_row(conn, row["id"]) for row in items) and not again:
         return True  # a repeated finalize must not ask again
+    if again:
+        _resolving.add(session_id)
     source_pages = _document_source_pages(conn, doc_id, session_id)
     question = Question(
         question_no=None,
@@ -4160,6 +4326,17 @@ def _answer_booklet(conn, session, session_id: int, doc_id: int) -> bool:
     def store(replies, failed) -> None:
         """The model's questions as the deck's rows and every answer, or the failure, in one commit."""
         nonlocal items
+        if again:
+            if failed is not None:
+                _record_solve_failure(conn, items[0], failed, commit=False, route=route if can_switch else None)
+                conn.commit()
+                return
+            # Over the rows that are shown; the retake is closed in the same commit, so the answers are given
+            # again exactly when the new ones are there.
+            placed.update(_placed_again(conn, session_id, replies, len(source_pages)))
+            _retake_close(conn, session_id)
+            _save_compared(conn, session_id, doc_id, placed, [], replies, route or "chatgpt-web", len(source_pages))
+            return
         problems = _model_problems([item for item, _ in replies], len(source_pages))
         carried = 0
         if problems and items and not any(_latest_solution_row(conn, row["id"]) for row in items):
@@ -4498,6 +4675,9 @@ def _save_solution(conn, row, result, solver_name: str, *, commit: bool = True, 
             json.dumps(result.diagrams, ensure_ascii=False),
             json.dumps({**{k: result.extras.get(k)
                            for k in ("answer_status", "missing_material", "answer_no", "review_note")},
+                        # The other read's answer where two reads differ (codex-cli): shown beside this one.
+                        **({"other_answer": result.extras["other_answer"]}
+                           if isinstance(result.extras.get("other_answer"), str) else {}),
                         # One read of two answered (codex-cli): said once behind the answers (_read_once_item).
                         **({"read_once": True} if result.extras.get("read_once") is True else {}),
                         # No read saw every page at its own size (codex-cli): said too (_pages_reduced_item).
@@ -4651,8 +4831,10 @@ def _resume_answers(conn, session) -> bool:
     if session["exam_type"] == "mixed":
         if not _mixed_work_pending(conn, session):
             return False
-    elif rows and (any(_latest_solution_row(conn, row["id"]) for row in rows)
-                   or not any(_retrying(row) for row in rows)):
+    elif rows and not _retake_open(session) and (any(_latest_solution_row(conn, row["id"]) for row in rows)
+                                                 or not any(_retrying(row) for row in rows)):
+        # (A booklet that is being read again after a retake has answers from before and waits for the new ones:
+        # with nothing reading it, a restart of the server having taken its batch, it is taken up here.)
         return False
     with _background_solves_lock:
         if session_id in _background_solves:
@@ -4790,6 +4972,22 @@ def _solve_deck_in_background(session_id: int, doc_id: int) -> None:
         try:
             conn.rollback()
             latest = _exam_session_or_404(conn, session_id)
+            if session_id in _resolving:
+                # This batch read the booklet again after a retake. Whatever came of it, the wait is over: with
+                # nothing new saved the answers from before are given again (a failure moved the revision on).
+                _resolving.discard(session_id)
+                if _retake_close(conn, session_id):
+                    conn.commit()
+            elif _retake_open(latest) and _session_phase(latest) == "reviewing":
+                # The retake's capture ended while this batch, begun before it, still ran (its second read): the
+                # booklet is read again now.
+                with _background_solves_lock:
+                    waiting = session_id not in _background_solves
+                    if waiting:
+                        _background_solves.add(session_id)
+                if waiting:
+                    threading.Thread(target=_solve_deck_in_background, args=(session_id, doc_id),
+                                     name=f"solve-session-{session_id}", daemon=True).start()
             active = True
             if os.environ.get("ROKID_SOLVER", "").strip() == "chatgpt-work":
                 try:
@@ -4856,7 +5054,9 @@ def exam_finalize_reading(session_id: int, solve: Literal["background"] | None =
         # carry only {"page_indexes": ...} (no "deck" key) and still count —
         # missing them here would re-segment a finalized session's deck.
         already_finalized = True
-        if not busy:
+        # Pages taken again after the answers were read: the reading is claimed again although its deck exists, and
+        # also beside a batch that still runs from before (its end starts the new one, _solve_deck_in_background).
+        if not busy or _retake_open(session):
             claim = conn.execute(
                 "UPDATE exam_sessions SET status = 'reviewing' "
                 "WHERE id = ? AND (status != 'reviewing' "
@@ -4947,6 +5147,40 @@ def exam_finalize_reading(session_id: int, solve: Literal["background"] | None =
         if not already_finalized:
             body["reading_ack"] = build_reading_done_ack(len(deck), total_pages)
         return body
+    finally:
+        conn.close()
+
+
+@app.post("/v1/exam-sessions/{session_id}/retake")
+def exam_retake(session_id: int) -> dict:
+    """The wearer takes pages again after reading the answers: the booklet takes pages again.
+
+    The glasses call this before they send the first page taken again (the last net; what the phone can tell by
+    itself is asked before anything is sent, ``capture_check``). The booklet and the reading are open again: a page
+    sent under its own number takes that page's place, and the two finalize calls end the capture as at the first
+    end. The booklet is then read again whole and its answers go over the questions that were shown
+    (``_answer_booklet``). From this call until those answers are saved, or that reading has given up, no answers
+    are given. Asked again before the capture has ended, it changes nothing.
+    """
+    conn = db.connect()
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        session = _exam_session_or_404(conn, session_id)
+        doc_id = _require_document_exam(session)
+        document = conn.execute("SELECT status FROM documents WHERE id = ?", (doc_id,)).fetchone()
+        if _retake_open(session) and _session_phase(session) == "reading" and document["status"] == "open":
+            conn.rollback()
+            return {"session_id": session_id, "document_id": doc_id, "already": True}
+        if (session["analysis_stage"] != "single" or _session_phase(session) != "reviewing"
+                or not any(_latest_solution_row(conn, row["id"]) for row in _deck_question_rows(conn, session_id))):
+            raise HTTPException(status_code=409, detail="this reading has no answers to take pages again for")
+        mark = conn.execute("SELECT COALESCE(MAX(id), 0) FROM solutions").fetchone()[0]
+        conn.execute("UPDATE documents SET status = 'open' WHERE id = ?", (doc_id,))
+        conn.execute("UPDATE exam_sessions SET status = 'open', retake_json = ? WHERE id = ?",
+                     (json.dumps({"mark": mark, "state": "open"}), session_id))
+        conn.commit()
+        print(json.dumps({"event": "retake", "session_id": session_id, "document_id": doc_id}), flush=True)
+        return {"session_id": session_id, "document_id": doc_id, "already": False}
     finally:
         conn.close()
 
@@ -5244,15 +5478,24 @@ def _ungathered_pages(conn, document_id: int | None) -> list[int]:
     return numbers
 
 
-def _ungathered_item(number: int) -> dict:
-    """One item at the end of the bundle for a recorded page that stayed one frame: shown as to be checked.
+def _retake_pages(conn, document_id: int | None, groups: list[dict], items: list[dict]) -> list[int]:
+    """The captures (numbers from 1) to take again, for the glasses to show after the answers: at most 100.
 
-    The glasses' AnswerItem refuses the whole bundle on a needs_review item with a blank answer and no figure
-    (relaycore, study/AnswerItem.java), so the answer says in words that there is none.
+    A recorded page that stayed the one frame it arrived as; and the pages named by a question that has no answer
+    for want of material, or whose two reads differ or of which only one read gave an answer (the notes the Codex
+    route's comparison leaves all begin with 2回). Until 2026-11-19 each of these was a sentence among the answers.
+    The phone asks for what it can tell by itself before anything is sent (``capture_check``); this is what only
+    the reading could tell. A question that named no page of its own stands for every page and names none here.
     """
-    return {"group_id": "pages", "group_label": "撮影の確認", "question_id": f"page{number}", "question_label": f"{number}頁",
-            "answer": "（解答なし）", "status": "needs_review",
-            "issue": f"{number}頁目は重ねられませんでした（1枚の画像で解析）。必要なら録り直してください"}
+    pages = set(_ungathered_pages(conn, document_id))
+    count = conn.execute("SELECT COUNT(*) FROM pages WHERE document_id = ?", (document_id,)).fetchone()[0]
+    rows = [row for group in groups for row in group["items"]]
+    for row, item in zip(rows, items):
+        if item["status"] == "needs_input" or (item["status"] == "needs_review" and item["issue"].startswith("2回")):
+            named = _row_page_indexes(row)
+            if not (len(named) == count and count > 2):
+                pages.update(index + 1 for index in named if 0 <= index < count)
+    return sorted(pages)[:100]
 
 
 def _unnamed_pages(conn, document_id: int | None, groups: list[dict]) -> list[int]:
@@ -5302,31 +5545,6 @@ def _read_once(conn, groups: list[dict]) -> bool:
     return _marked(conn, groups, "read_once")
 
 
-def _pages_reduced_item() -> dict:
-    """One item behind the answers, in the form of the capture notices: the booklet was more than one request holds
-    and no read saw every page at its own size. Body print still reads at the sizes this happens at (M-44 (20):
-    characters of nine pixels read as at twenty-five, of six worse); what is small on the paper may not."""
-    return {"group_id": "pages", "group_label": "撮影の確認", "question_id": "pages-reduced", "question_label": "縮小",
-            "answer": "（頁を縮小して読みました）", "status": "needs_review",
-            "issue": "頁数が多く、各頁を縮小して読みました。小さい字（指数・添字・ルビ）の答えは紙面で確かめてください"}
-
-
-def _read_once_item() -> dict:
-    """One item behind the answers, in the form of the capture notices (``_ungathered_item``): an unmarked answer
-    means that two reads agree, and here nothing was compared."""
-    return {"group_id": "pages", "group_label": "撮影の確認", "question_id": "read-once", "question_label": "照合なし",
-            "answer": "（1回読み）", "status": "needs_review",
-            "issue": "2回の読みの片方が戻らず、答えは照合していません"}
-
-
-def _comparing_item() -> dict:
-    """The same place and form while the route still compares the answers shown with its other read (_comparing).
-    An item of its own, not ``_read_once_item`` reworded: the glasses hold a question to its label."""
-    return {"group_id": "pages", "group_label": "撮影の確認", "question_id": "read-comparing", "question_label": "照合中",
-            "answer": "（もう1回の読みを待っています）", "status": "needs_review",
-            "issue": "1回目の読みの答えです。照合が終わると更新します"}
-
-
 def _answer_snapshot(session_id: int, *, identify: bool) -> dict:
     """The answer bundle. ``identify=False`` leaves ``input_digest`` empty and reads no page file.
 
@@ -5346,6 +5564,10 @@ def _answer_snapshot(session_id: int, *, identify: bool) -> dict:
             raise HTTPException(status_code=409, detail="real-mode answers are locked")
         groups = _answer_groups(conn, session_id)
         running = _resume_answers(conn, session)
+        again = _retake_round(session)
+        if again is not None and again.get("state") == "open":
+            # Pages were taken again and the booklet is being read with them: not the answers from before.
+            raise HTTPException(status_code=409, detail="the answers are being made")
         if not groups:
             # The send gate keeps the booklet and writes nothing (_answer_deck): say that, not "no problems".
             gated = ((os.environ.get("ROKID_SOLVER") or "").strip() in _SEND_GATED_ROUTES
@@ -5367,19 +5589,32 @@ def _answer_snapshot(session_id: int, *, identify: bool) -> dict:
         unnamed = (_unnamed_pages(conn, session["document_id"], groups)
                    if os.environ.get("ROKID_UNNAMED_PAGES_NOTICE") == "1"
                    and any(item["status"] in ("ready", "needs_review") for item in items) else [])
-        items += [_ungathered_item(number) for number in _ungathered_pages(conn, session["document_id"])]
+        # Nothing but the paper's questions (the operator, 2026-11-19: no explanations among the answers). The pages
+        # to take again are numbers of their own; that pages were reduced, or that one read answered alone, stays
+        # with the answers on the server.
+        retake = (_retake_pages(conn, session["document_id"], groups, items)
+                  if session["analysis_stage"] == "single" else [])
+        if again is not None:
+            # An answer the wearer had before pages were taken again, unchanged: the glasses show what is new first.
+            for row, item in zip((row for group in groups for row in group["items"]), items):
+                before = conn.execute("SELECT answer, answer_metadata_json FROM solutions WHERE question_id = ? "
+                                      "AND id <= ? ORDER BY id DESC LIMIT 1", (row["id"], again["mark"])).fetchone()
+                now = _latest_solution_row(conn, row["id"])
+                if item["status"] == "ready" and before is not None and now is not None and before["answer"] == now["answer"]:
+                    try:
+                        kept = json.loads(before["answer_metadata_json"] or "{}")
+                    except (ValueError, TypeError):
+                        kept = {}
+                    if kept.get("answer_status") != "needs_input" and not kept.get("review_note"):
+                        item["seen"] = True
         if unnamed:
             items.append(_unnamed_pages_item(unnamed))
-        # One read's answers are shown. While their route still compares them with its other read, that is said;
-        # once it does not, nothing was compared. That second state has a revision of its own: a comparison can
-        # end with nothing saved (the route failed behind its first read, or the server stopped), and the glasses
-        # are told of a change by the revision alone.
-        if _marked(conn, groups, "pages_reduced"):
-            items.append(_pages_reduced_item())
+        # One read's answers are shown. While their route still compares them with its other read, the bundle says
+        # so (the glasses show "…"); once it does not, the mark goes. That second state has a revision of its own:
+        # a comparison can end with nothing saved (the route failed behind its first read, or the server stopped),
+        # and the glasses are told of a change by the revision alone.
         once = _read_once(conn, groups)
         comparing = once and session_id in _comparing
-        if once:
-            items.append(_comparing_item() if comparing else _read_once_item())
         bundle = {
             "schema_version": max((diagram_schema_version(i.get("diagrams", [])) for i in items), default=1),
             "session_id": str(session_id),
@@ -5387,6 +5622,8 @@ def _answer_snapshot(session_id: int, *, identify: bool) -> dict:
             "revision": _answer_revision(conn, session_id) + int(once and not comparing),
             "analysis_stage": session["analysis_stage"],
             "available_stage": _available_stage(session, items),
+            **({"comparing": True} if comparing else {}),
+            **({"retake": retake} if retake else {}),
             "items": items,
         }
         _check_answer_bundle_capacity(bundle)

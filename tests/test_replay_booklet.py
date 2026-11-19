@@ -257,8 +257,9 @@ def test_a_clip_that_is_gone_from_the_source_fails_the_first_check(tmp_path, tar
     assert (first["http"], first["status"]) == (201, "done")
     assert (second["page"], second["http"], second["status"]) == (2, None, replay_booklet.NOT_SENT)
     assert [page["http"] for page in report["pages"]] == [201, 201], "the page itself is sent: it exists whatever its clip does"
-    assert report["answers"]["pages_left_as_one_frame"] == [2], "and the server's answers name it"
-    assert report["answers"]["items"] == {"ready": 1, "needs_input": 1, "needs_review": 1}
+    assert report["answers"]["pages_left_as_one_frame"] == [2], "and the server's answers ask for it again"
+    assert report["answers"]["retake"] == [1, 2], "with the page of the question the stand-in leaves open"
+    assert report["answers"]["items"] == {"ready": 1, "needs_input": 1}, "nothing but the paper's questions"
 
 
 def test_a_gathering_that_does_not_finish_in_the_wait_fails(tmp_path, target, monkeypatch):

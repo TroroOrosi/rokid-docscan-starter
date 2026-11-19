@@ -362,29 +362,18 @@ def booklet(tmp_path_factory):
     return result
 
 
-def named(bundle):
-    """The items the server added for pages that stayed one frame, by page number (``page3``; not ``pages-unanswered``)."""
-    return {int(item["question_id"][4:]): item for item in bundle["items"] if re.fullmatch(r"page\d+", item["question_id"])}
-
-
-def test_a_page_that_was_not_gathered_is_named_in_the_answers(booklet):
+def test_a_page_that_was_not_gathered_is_a_page_to_take_again(booklet):
+    """Until 2026-11-19 each such page was an item behind the answers that said so in a sentence. The bundle now
+    names the pages to take again by their numbers (``retake``) and carries nothing but the answers."""
     assert [(clip["page_index"], clip["status"]) for clip in booklet["clips"]] == [(0, "failed"), (3, "done")]
     assert booklet["clips"][0]["reason"], "the clip's row says why"
     assert booklet["finalize_s"] < 30, "finalization waited for the workers, not for its limit"
     items = booklet["bundle"]["items"]
-    assert [(item["status"], item["answer"][:6]) for item in items[:2]] == [("ready", "経路検査の録"), ("needs_input", "")]
-    item = named(booklet["bundle"])[1]
-    assert item is items[2], "after the answers, at the end of the bundle"
-    assert item["status"] == "needs_review"
-    assert item["issue"] == "1頁目は重ねられませんでした（1枚の画像で解析）。必要なら録り直してください"
-    assert sorted(named(booklet["bundle"])) == [1, 2], "not the still (page 3), not the gathered page (page 4)"
-
-
-def test_a_clip_frame_page_whose_clip_never_came_is_named_in_the_answers(booklet):
-    assert all(clip["page_index"] != 1 for clip in booklet["clips"]), "no clip of page 2 ever reached the server"
-    item = named(booklet["bundle"])[2]
-    assert item["status"] == "needs_review"
-    assert item["issue"] == "2頁目は重ねられませんでした（1枚の画像で解析）。必要なら録り直してください"
+    assert [(item["status"], item["answer"][:6]) for item in items] == [("ready", "経路検査の録"), ("needs_input", "")]
+    assert all(item["group_id"] != "pages" for item in items), "no item that is not a question of the paper"
+    # Page 1: its clip failed. Page 2: no clip of it ever reached the server. Not the still (3) nor the gathered page (4).
+    assert all(clip["page_index"] != 1 for clip in booklet["clips"])
+    assert booklet["bundle"]["retake"] == [1, 2]
 
 
 def test_the_glasses_can_read_a_bundle_that_names_pages(booklet):

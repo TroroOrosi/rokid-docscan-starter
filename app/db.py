@@ -214,6 +214,9 @@ _EXAM_SESSION_MIGRATIONS = (
     ("audio_path", "TEXT"),
     ("transcript", "TEXT"),
     ("analysis_stage", "TEXT NOT NULL DEFAULT 'single'"),
+    # The last time pages were taken again after the answers were read (main._retake_round); NULL for a booklet
+    # read once.
+    ("retake_json", "TEXT"),
 )
 
 # Additive result/cache metadata introduced after the original tables. Keeping

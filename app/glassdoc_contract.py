@@ -45,8 +45,11 @@ GLASSDOC_OPERATION_CONTRACT = {
     },
     "answers": {
         "delivery": "answer-bundle",
-        "layout": "fixed_full_answer_slides",
-        "next_previous": "swipe",
+        # From Glasses View 1.53.0: the certain answers first, then the captures to take again, then the answers
+        # that are not certain, then those the wearer already had; no explanations among them.
+        "layout": "certain_then_retake_then_uncertain_then_seen",
+        "next_previous": "swipe_past_the_last_screen_to_the_first",
+        "retake": "double_tap_while_captures_to_take_again_are_listed",
         "writing_done": "one_double_tap_then_display_sleep",
         "exit": "two_more_double_taps_within_3_seconds_while_waiting",
         "writing_done_counts_toward_exit": False,
