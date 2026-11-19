@@ -130,6 +130,11 @@ final class AnswerJson {
         catch (NumberFormatException invalid) { throw new IOException("invalid answer integer", invalid); }
     }
 
+    static boolean flag(JsonReader reader) throws IOException {
+        if (reader.peek() != JsonToken.BOOLEAN) throw new IOException("invalid answer flag");
+        return reader.nextBoolean();
+    }
+
     static void endDocument(JsonReader reader) throws IOException {
         if (reader.peek() != JsonToken.END_DOCUMENT) throw new IOException("trailing answer JSON");
     }

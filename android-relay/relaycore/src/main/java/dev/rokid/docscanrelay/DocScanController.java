@@ -47,6 +47,18 @@ public final class DocScanController implements AutoCloseable {
         default void persistConfiguration(String server, String key) throws IOException { }
 
         default void onListeningReady(File directory, long documentId, boolean resume) { }
+
+        /**
+         * The capture had ended and goes on: the phone found these pages (numbers from 1) not whole, and they are
+         * taken again in place before the booklet goes out. The display and the camera come back for it.
+         */
+        default void onRetakeRequested(List<Integer> pageNumbers) { }
+
+        /**
+         * The retake the wearer began from the answers was left by a double tap before any page of it was taken:
+         * nothing changed, and that double tap ends the writing.
+         */
+        default void onRetakeLeft() { }
     }
 
     private static final String PREFS = "docscan_relay";
@@ -117,6 +129,18 @@ public final class DocScanController implements AutoCloseable {
     private boolean localUploadBlocked;
     private volatile boolean closed;
     private final RetryCursor retryCursor = new RetryCursor();
+    /**
+     * The saved pages (indexes) still to be taken again, in order, because the phone found them not whole when the
+     * capture had ended (queueLocalUpload, the server's capture-check): a clip that could not be gathered, or one
+     * gathered from too few frames. Each is taken in place, under its own number; with the last one saved the
+     * booklet goes out by itself, and a double tap sends it as it is. The serial thread only.
+     */
+    private final java.util.ArrayDeque<Integer> retakeQueue = new java.util.ArrayDeque<>();
+    private volatile boolean retaking;
+    /** A page asked for again has been saved since the retake began. */
+    private boolean retakeTouched;
+    /** The retake in hand was begun by the wearer from the answers (retakeAnswered), not by the phone's check. */
+    private boolean retakeFromAnswers;
     private volatile java.util.function.Supplier<CaptureInspectionOrigin.Context> inspectionContext = () -> null;
     private volatile ClipInbox clipInbox;
     // Metadata only: one selected local session, at most its 1000 pages and two future candidates.
@@ -951,8 +975,9 @@ public final class DocScanController implements AutoCloseable {
                 // A clip being recorded ends here and what it has is the page. A still the camera has been asked
                 // for cannot be cut short: it lands first, and handlePhoto closes its camera. Either page waits,
                 // unseen, for the return. A still that was only being prepared (up to ten seconds of waiting for
-                // a still head) is given up by the camera, which answers through onPhotoNotStarted.
-                link.pausePreview();
+                // a still head) is given up by the camera, which answers through onPhotoNotStarted; so is a clip
+                // that has not yet the still frames of a page (2026-11-19): it is recorded again on return.
+                link.pauseForReturn();
                 listener.onUpdate(state, currentHudLines, "Capture paused by the wearer; the page in hand is kept");
                 return;
             }
@@ -981,9 +1006,129 @@ public final class DocScanController implements AutoCloseable {
         }
     }
 
+    /** Whether pages the phone asked for are still to be taken again: their numbers stay on the display meanwhile. */
+    public boolean isRetaking() { return retaking; }
+
+    /** The pages (indexes) the phone found not whole are taken again in place; see {@link #retakeQueue}. */
+    void retakePages(List<Integer> pageIndexes) {
+        List<Integer> asked = new ArrayList<>(pageIndexes);
+        try { serial.execute(() -> retakePagesNow(asked)); } catch (RejectedExecutionException ignored) { }
+    }
+
+    private void retakePagesNow(List<Integer> asked) {
+        LocalCaptureSession saved = localSession;
+        if (closed || saved == null || !link.supportsLocalCaptureReview() || state == RelayState.ERROR) return;
+        retakeQueue.clear();
+        for (int index : asked) if (index >= 0 && index < saved.pageCount() && !retakeQueue.contains(index)) retakeQueue.add(index);
+        if (retakeQueue.isEmpty()) {
+            // Nothing this reading holds was asked for: the booklet goes out (the check is not made twice).
+            if (saved.phase() == LocalCaptureSession.Phase.ANALYSIS) queueLocalUpload();
+            return;
+        }
+        try { saved.setPhase(LocalCaptureSession.Phase.CAPTURE); }
+        catch (IOException error) { retakeQueue.clear(); fail("撮り直しを保存できません", null); return; }
+        retaking = true;
+        finishCaptureRequested = false;
+        capturePaused = false;
+        manualCaptureRequested = false;
+        List<Integer> numbers = retakeNumbers();
+        UseLog.i(LOG, "retake_asked pages=" + numbers);
+        listener.onRetakeRequested(numbers);
+        publish(RelayState.READING, List.of(retakeLine(numbers), "", ""), "The phone asked for pages to be taken again");
+        // The camera watches again. What is in view at this moment is not the page: the wearer has only just been
+        // told and has not opened it (on the desk, 2026-11-19, the view in hand was recorded 0.7 s after the numbers
+        // came up). The page is the next view that differs from it and lies still; a forward swipe takes what is in
+        // view.
+        link.resetPageDetection();
+        link.passOverViewInHand();
+        if (autoCaptureEnabled) { autoRunGeneration++; waitForNextPage(); }
+        else startAutoCaptureNow();
+    }
+
+    /**
+     * Whether pages of the reading in hand can be taken again now that its answers are being read (the last net:
+     * what only the reading could tell, the answer bundle's {@code retake}). Read from the display's thread.
+     */
+    public boolean canRetakeAnswered(List<Integer> pageIndexes) {
+        LocalCaptureSession saved = localSession;
+        if (closed || saved == null || state != RelayState.REVIEW || saved.sessionId() == 0
+                || saved.phase() != LocalCaptureSession.Phase.REVIEW || !link.supportsLocalCaptureReview()) return false;
+        for (int index : pageIndexes) if (index >= 0 && index < saved.pageCount()) return true;
+        return false;
+    }
+
+    /**
+     * The wearer takes these pages (indexes) again after reading the answers. They are taken in place like the pages
+     * the phone asks for before anything is sent; before the first of them is sent the phone is told that the
+     * booklet takes pages again (queueLocalUpload), and after the end the booklet is read again with them.
+     */
+    public void retakeAnswered(List<Integer> pageIndexes) {
+        List<Integer> asked = new ArrayList<>(pageIndexes);
+        try { serial.execute(() -> {
+            LocalCaptureSession saved = localSession;
+            if (!canRetakeAnswered(asked)) return;
+            try { saved.setRetakeReopen(true); }
+            catch (IOException error) { fail("撮り直しを保存できません", null); return; }
+            retakeTouched = false;
+            retakeFromAnswers = true;
+            retakePagesNow(asked);
+        }); } catch (RejectedExecutionException ignored) { }
+    }
+
+    /**
+     * The wearer double-taps in the retake begun from the answers before any page of it is taken or being taken: the
+     * retake is left. The reading is as it was while its answers were read, nothing is sent or read again, and the
+     * display is told ({@link Listener#onRetakeLeft}), which ends the writing as the double tap on the answers did
+     * before pages were listed there. True when the retake was left.
+     */
+    private boolean leaveUntouchedRetakeNow() {
+        LocalCaptureSession saved = localSession;
+        if (closed || saved == null || !retaking || !retakeFromAnswers || retakeTouched || state.isCaptureInProgress()
+                || captureReview.hasPending() || captureLease.isUnresolved()) return false;
+        UseLog.i(LOG, "retake_left pages=" + retakeNumbers() + " untouched");
+        retakeQueue.clear();
+        retaking = false;
+        retakeFromAnswers = false;
+        finishCaptureRequested = true;
+        autoRunGeneration++;
+        clearArmedCapture();
+        link.pausePreview();
+        try {
+            saved.setRetakeReopen(false);
+            saved.setPhase(LocalCaptureSession.Phase.REVIEW);
+            saved.answersArrived(); // they are saved on the glasses already: nothing is waited for
+        } catch (IOException error) { fail("撮り直しの取消を保存できません", null); return true; }
+        state = RelayState.REVIEW; // no update of its own: the display ends the writing
+        listener.onRetakeLeft();
+        return true;
+    }
+
+    private List<Integer> retakeNumbers() {
+        List<Integer> numbers = new ArrayList<>();
+        for (int index : retakeQueue) numbers.add(index + 1);
+        return numbers;
+    }
+
+    private static String retakeLine(List<Integer> numbers) {
+        StringBuilder line = new StringBuilder("再撮影 ");
+        for (int place = 0; place < numbers.size(); place++) line.append(place == 0 ? "" : "・").append(numbers.get(place));
+        return line.toString();
+    }
+
+    /** The page the next capture is: the first one still asked for again, else the next new page. */
+    private int nextCaptureIndex() {
+        Integer again = retakeQueue.peekFirst();
+        return again != null ? again : nextPageIndex;
+    }
+
     private void finishLocalCaptureNow() {
+        if (leaveUntouchedRetakeNow()) return;
         invalidateInspectionFeedback();
         capturePaused = false;
+        retakeFromAnswers = false;
+        if (retaking) UseLog.i(LOG, "retake_left pages=" + retakeNumbers());
+        retakeQueue.clear(); // the wearer ends it: the booklet goes out as it is
+        retaking = false;
         if (!finishCaptureRequested) {
             endRequestedAtMillis = android.os.SystemClock.elapsedRealtime();
             UseLog.i(LOG, "end_requested state=" + state);
@@ -1526,7 +1671,7 @@ public final class DocScanController implements AutoCloseable {
         armCaptureAt(
                 captureTargetPageIndex >= 0
                         ? captureTargetPageIndex
-                        : retryCursor.nextOr(nextPageIndex),
+                        : retryCursor.nextOr(nextCaptureIndex()),
                 false);
     }
 
@@ -1696,8 +1841,9 @@ public final class DocScanController implements AutoCloseable {
                                 + (replacingPending ? " 撮り直し準備" : " 撮影準備"),
                         "無理のない姿勢で合わせる",
                         "シャッターはスマホ");
-        long viewGeneration =
-                link.showCaptureAiming(pageIndex + 1, replacingPending, stabilizing);
+        // A page the reading already holds is being taken again: the display says so beside its number.
+        long viewGeneration = link.showCaptureAiming(pageIndex + 1,
+                replacingPending || (localSession != null && pageIndex < localSession.pageCount()), stabilizing);
         if (viewGeneration == CaptureSurface.NO_VIEW_GENERATION) {
             listener.onUpdate(
                     state,
@@ -2220,7 +2366,23 @@ public final class DocScanController implements AutoCloseable {
 
         manualCaptureRequested = false;
         listener.onCaptureReviewCleared();
-        publish(RelayState.READING, List.of(nextPageIndex + "枚保存済み", "次のページへ", "ダブルタップで撮影終了"),
+        Integer asked = retakeQueue.peekFirst();
+        if (asked != null && asked == pending.pageIndex) {
+            retakeQueue.pollFirst();
+            retakeTouched = true;
+            UseLog.i(LOG, "retake_saved index=" + pending.pageIndex + " left=" + retakeQueue.size());
+            if (retakeQueue.isEmpty()) {
+                // The last page asked for is in: the booklet goes out, as after the wearer's own double tap.
+                retaking = false;
+                finishCaptureRequested = true;
+                endRequestedAtMillis = android.os.SystemClock.elapsedRealtime();
+                UseLog.i(LOG, "end_requested state=" + state + " by=retake");
+                autoRunGeneration++;
+                link.pausePreview();
+            }
+        }
+        publish(RelayState.READING, retaking ? List.of(retakeLine(retakeNumbers()), "", "")
+                        : List.of(nextPageIndex + "枚保存済み", "次のページへ", "ダブルタップで撮影終了"),
                 "Photo committed locally; network upload queued");
         queueLocalUpload();
         if (promoteFutureCandidate()) { observeFutureCandidates(); return; }
@@ -2380,9 +2542,21 @@ public final class DocScanController implements AutoCloseable {
             boolean audioAttachInProgress = false;
             boolean retryable = false;
             JSONObject finished = null;
+            final List<Integer> again = new ArrayList<>(); // the pages (indexes) the phone asks to be taken again
             try {
                 if (transferLock != null) transferLock.acquire(TRANSFER_LOCK_MILLIS);
                 LocalCaptureSession.Page page = saved.nextUnsent();
+                if (page != null && saved.retakeReopen() && saved.sessionId() != 0) {
+                    // Pages are taken again after the answers were read: the phone opens the booklet and the
+                    // reading again before the first of them arrives (it refuses a page of a finished reading).
+                    // Asked twice it changes nothing, so a lost answer to this call is tried again like a page.
+                    httpInProgress = true;
+                    calls.begin("retake", -1, -1);
+                    destination.retakeSession(saved.sessionId());
+                    calls.end("ok", false);
+                    httpInProgress = false;
+                    saved.setRetakeReopen(false);
+                }
                 if ((page != null || saved.listening()) && saved.documentId() == 0) {
                     // An ambiguous create can leave an empty server document; images only use the durably bound ID.
                     httpInProgress = true;
@@ -2438,8 +2612,33 @@ public final class DocScanController implements AutoCloseable {
                 }
                 // A page saved while the clips above were on their way is still unsent here, and so is its clip: the
                 // booklet is finalized only when nothing is left, on a later pass.
-                if (!closed && saved.phase() == LocalCaptureSession.Phase.ANALYSIS && saved.documentId() > 0
-                        && saved.nextUnsent() == null && saved.nextUnsentClip() == null) {
+                boolean ended = !closed && saved.phase() == LocalCaptureSession.Phase.ANALYSIS && saved.documentId() > 0
+                        && saved.nextUnsent() == null && saved.nextUnsentClip() == null;
+                if (ended && !saved.captureChecked() && !saved.listening()) {
+                    // Once a reading, before anything is finalized or asked of a model: the phone says which
+                    // recorded pages are not whole (a clip it could not gather, or one gathered from too few
+                    // frames), and those are taken again in place. The call waits for the clips, as the finalize
+                    // call did until now, so the booklet goes out no later for it.
+                    httpInProgress = true;
+                    if (transferLock != null) transferLock.acquire(transferLockMillis("finalize"));
+                    calls.begin("check", -1, -1);
+                    try {
+                        org.json.JSONArray asked = destination.captureCheck(saved.documentId()).optJSONArray("retake");
+                        for (int place = 0; asked != null && place < asked.length(); place++) again.add(asked.optInt(place, 0) - 1);
+                        calls.end("ok", false);
+                        UseLog.i(LOG, "capture_check retake=" + again.size());
+                    } catch (DocScanApi.ApiException refused) {
+                        // A server that has no such check (before 2026-11-19), or refuses it: the booklet goes out
+                        // as it always did. A failed transfer is tried again like every other call here.
+                        int status = refused.getStatusCode();
+                        if (status == 408 || status == 429 || status >= 500) throw refused;
+                        calls.end("http_" + status, false);
+                    }
+                    if (transferLock != null) transferLock.acquire(TRANSFER_LOCK_MILLIS);
+                    httpInProgress = false;
+                    saved.setCaptureChecked();
+                }
+                if (ended && again.isEmpty()) {
                     analysisStarted = true;
                     // Finalizing the document and finalizing the reading can be repeated: the server skips pages it
                     // has analysed, claims the reading once and does not start a batch beside one that runs
@@ -2510,6 +2709,7 @@ public final class DocScanController implements AutoCloseable {
                     localUploadBlocked = true;
                     fail(analysisFailed ? "解析を停止しました。資料は保存済みです" : UPLOAD_STOPPED, null);
                 } else {
+                    if (!again.isEmpty()) retakePagesNow(again);
                     if (result != null) handleFinalizedSession(result, "Local session analysis finished");
                     if (retry) {
                         listener.onUpdate(state, currentHudLines, "Network work paused; local images retained for retry");
@@ -2939,7 +3139,7 @@ public final class DocScanController implements AutoCloseable {
             try { serial.execute(() -> {
                 if (run != autoRunGeneration || !autoCaptureEnabled || finishCaptureRequested
                         || (state != RelayState.READY && state != RelayState.READING)) return;
-                armCaptureAt(nextPageIndex, false);
+                armCaptureAt(nextCaptureIndex(), false);
             }); } catch (RejectedExecutionException ignored) { }
         });
     }

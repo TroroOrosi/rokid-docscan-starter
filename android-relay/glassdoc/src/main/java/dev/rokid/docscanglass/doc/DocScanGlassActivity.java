@@ -807,6 +807,7 @@ public final class DocScanGlassActivity extends Activity
                     backExit.reset();
                     answers.refresh();
                 } else {
+                    if (startRetakeFromAnswers(elapsedMillis)) return;
                     boolean interim = reader.bundle().intermediate();
                     if (!closeAnswers(!interim)) return;
                     if (interim) {
@@ -816,14 +817,7 @@ public final class DocScanGlassActivity extends Activity
                         hud.showLines(List.of("読解の記入終了", "音声答案を待っています", "タップで録音開始・終了"));
                         return;
                     }
-                    writingDone = true;
-                    backExit.reset(); // the completion gesture never arms the exit window
-                    stopCaptureHardware();
-                    notifyPhase("writing_done", activeSession());
-                    awaitingAnswers = false;
-                    getWindow().clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
-                    hud.showLines(List.of("記入終了", "", ""));
-                    displaySleep.sleep(this);
+                    markWritingDone();
                 }
                 return;
             }
@@ -843,6 +837,8 @@ public final class DocScanGlassActivity extends Activity
             }
             return;
         }
+        if (action == GlassesInputAction.BACK && retakeAskedAtMillis >= 0 && elapsedMillis >= retakeAskedAtMillis
+                && elapsedMillis - retakeAskedAtMillis < RETAKE_GRACE_MILLIS) return;
         if (mixedMode) {
             boolean swipe = action == GlassesInputAction.SWIPE_FORWARD || action == GlassesInputAction.SWIPE_BACK;
             if (awaitingAnswers && swipe) {
@@ -1156,6 +1152,26 @@ public final class DocScanGlassActivity extends Activity
         });
     }
 
+    /**
+     * The capture had ended and the display had gone dark for the wait: the phone found pages that are not whole,
+     * and they are taken again before the booklet goes out. The capture's display comes back as at its start; the
+     * controller then shows the pages' numbers and watches for the first of them.
+     */
+    @Override public void onRetakeRequested(List<Integer> pageNumbers) {
+        main.post(() -> {
+            if (sessionClosed || writingDone || !isCurrentPowerGeneration(powerGeneration)) return;
+            UseLog.i(TAG, "retake_shown pages=" + pageNumbers);
+            leaveAnswersForRetake();
+            awaitingAnswers = false;
+            endAskedAtMillis = -1; // a double tap from here on is a new end, not the echo of the one before
+            backExit.reset();
+            captureDisplayActive = true;
+            if (!displaySleep.wake(this)) Log.w(TAG, "retake display wake request refused");
+            keepDisplayActive();
+            notifyPhase("capturing", controller.sessionId(), "wake");
+        });
+    }
+
     @Override
     public void onConfigurationRejected(String message) {
         main.post(() -> Toast.makeText(this, message, Toast.LENGTH_LONG).show());
@@ -1219,8 +1235,9 @@ public final class DocScanGlassActivity extends Activity
         }
         main.post(() -> {
             hud.showLines(GlassesHudText.adapt(hudLines, mixedMode || listeningMode));
-            // Waiting to shoot: nothing here needs reading, and the page is behind it.
-            if (state == RelayState.READY || state == RelayState.READING) hud.fadeSoon();
+            // Waiting to shoot: nothing here needs reading, and the page is behind it. The numbers of the pages
+            // to take again stay: they are what the wearer goes by.
+            if ((state == RelayState.READY || state == RelayState.READING) && !controller.isRetaking()) hud.fadeSoon();
         });
     }
 
@@ -1455,7 +1472,8 @@ public final class DocScanGlassActivity extends Activity
                 String question = bundle.items.get(0).questionId;
                 int offset = 0;
                 long saving = SystemClock.elapsedRealtime();
-                if (saved != null && saved.bundle.sessionId.equals(bundle.sessionId)) {
+                if (saved != null && saved.bundle.sessionId.equals(bundle.sessionId)
+                        && saved.bundle.inputDigest.equals(bundle.inputDigest)) {
                     AnswerReader validation = new AnswerReader(saved.bundle, true);
                     validation.restore(saved.questionId, saved.offset);
                     if (!validation.accept(bundle)) throw new IOException("answer identity changed");
@@ -1653,6 +1671,78 @@ public final class DocScanGlassActivity extends Activity
         });
     }
 
+    /** A double tap made again this soon after the one that began a retake is that same double tap. */
+    private static final long RETAKE_GRACE_MILLIS = 1500;
+    private long retakeAskedAtMillis = -1;
+
+    /**
+     * The answers end with pages to take again (the bundle's {@code retake}: what only the reading could tell): a
+     * double tap takes them, where it otherwise ends the writing (the operator, 2026-11-19). The answers stay saved;
+     * the capture comes back with those pages' numbers (onRetakeRequested), and the booklet is read again with what
+     * is taken. A second double tap before any page is taken leaves the retake and ends the writing (onRetakeLeft).
+     * False when there is nothing to take again or this reading cannot take pages (answers opened from the chooser).
+     */
+    private boolean startRetakeFromAnswers(long elapsedMillis) {
+        if (mixedMode || listeningMode || reader == null || controller == null) return false;
+        if (retakeAskedAtMillis >= 0 && elapsedMillis >= retakeAskedAtMillis
+                && elapsedMillis - retakeAskedAtMillis < RETAKE_GRACE_MILLIS) return true;
+        List<Integer> indexes = new ArrayList<>();
+        for (int number : reader.retakePages()) indexes.add(number - 1);
+        if (indexes.isEmpty() || !controller.canRetakeAnswered(indexes)) return false;
+        UseLog.i(TAG, "retake_from_answers pages=" + reader.retakePages());
+        retakeAskedAtMillis = elapsedMillis;
+        backExit.reset();
+        controller.retakeAnswered(indexes);
+        return true;
+    }
+
+    /** The reader leaves the display for a retake; its place is kept as well as it can be, the answers stay open. */
+    private void leaveAnswersForRetake() {
+        if (reader == null) return;
+        persistAnswerPosition(false);
+        reader = null;
+        answersHidden = false;
+        answers = null;
+        setContentView(hud);
+    }
+
+    /** The wearer has finished writing: nothing more is shown for this reading, and the display sleeps. */
+    private void markWritingDone() {
+        writingDone = true;
+        backExit.reset(); // the completion gesture never arms the exit window
+        stopCaptureHardware();
+        notifyPhase("writing_done", activeSession());
+        awaitingAnswers = false;
+        getWindow().clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
+        hud.showLines(List.of("記入終了", "", ""));
+        displaySleep.sleep(this);
+    }
+
+    /**
+     * The retake begun from the answers was left by a double tap before any page of it was taken: that double tap
+     * ends the writing, as it did on the answers before pages were listed there. The saved answers are closed first,
+     * as the reader closes them.
+     */
+    @Override public void onRetakeLeft() {
+        main.post(() -> {
+            if (sessionClosed || writingDone || !isCurrentPowerGeneration(powerGeneration)) return;
+            UseLog.i(TAG, "retake_left_ends_writing");
+            retakeAskedAtMillis = -1;
+            queueAnswerPersistence(() -> {
+                try {
+                    AnswerStore.Saved saved = loadSavedAnswers();
+                    if (saved != null && !saved.closed) answerStore.save(saved.bundle, saved.questionId, saved.offset, true);
+                } catch (Exception failed) {
+                    Log.w(TAG, "answers could not be closed after a retake was left", failed);
+                }
+                main.post(() -> {
+                    if (sessionClosed || writingDone || !isCurrentPowerGeneration(powerGeneration)) return;
+                    markWritingDone();
+                });
+            });
+        });
+    }
+
     private boolean closeAnswers() {
         return closeAnswers(true);
     }
@@ -1790,7 +1880,10 @@ public final class DocScanGlassActivity extends Activity
     }
 
     private void enterIdleDisplay(String phase, long session) {
-        boolean entering = !phase.equals(powerPhase) || session != powerSession;
+        // Entering: another phase, or another reading. Not the same phase's display already asleep when only the
+        // reading's id becomes known: on 2026-11-19 the display lit for five seconds some seventy seconds after
+        // each end, when the phone had made the session, with nothing new to show (the id is still sent below).
+        boolean entering = !phase.equals(powerPhase) || (session != powerSession && !(idleAsleep && powerSession == 0));
         if (entering || (displayIdle == null && !idleAsleep)) {
             keepDisplayActive();
             scheduleDisplayIdle();

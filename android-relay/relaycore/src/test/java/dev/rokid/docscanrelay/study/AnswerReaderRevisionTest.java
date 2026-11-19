@@ -151,10 +151,29 @@ public class AnswerReaderRevisionTest {
     }
 
     @Test public void issueOnlyChangeInAnyContinuousItemReflows() {
+        // Only a failure shows its sentence: an answer in doubt shows its mark and the other read's answer.
         assertChangedItemReflowsAtEveryPosition(
-                target("same answer", AnswerItem.Status.NEEDS_REVIEW, "old issue", List.of()),
-                target("same answer", AnswerItem.Status.NEEDS_REVIEW, "new issue", List.of()),
-                "【要確認】new issue\nsame answer");
+                target("", AnswerItem.Status.FAILED, "old issue", List.of()),
+                target("", AnswerItem.Status.FAILED, "new issue", List.of()),
+                "解析できません\nnew issue");
+    }
+
+    private static AnswerItem target(String answer, AnswerItem.Status status, String issue, String other, boolean seen) {
+        return new AnswerItem("g", "Group", "target", "Target", answer, status, issue, List.of(), List.of(), other, seen);
+    }
+
+    @Test public void otherReadOnlyChangeInAnyContinuousItemReflows() {
+        assertChangedItemReflowsAtEveryPosition(
+                target("same answer", AnswerItem.Status.NEEDS_REVIEW, "check", "old other", false),
+                target("same answer", AnswerItem.Status.NEEDS_REVIEW, "check", "new other", false),
+                "？Group Target same answer｜new other");
+    }
+
+    @Test public void seenOnlyChangeInAnyContinuousItemReflows() {
+        assertChangedItemReflowsAtEveryPosition(
+                target("same answer", AnswerItem.Status.READY, "", "", false),
+                target("same answer", AnswerItem.Status.READY, "", "", true),
+                "right answer\ncontinued\nGroup Target same answer");
     }
 
     @Test public void diagramGeometryStyleAndOrderChangesInAnyContinuousItemReflow() throws Exception {

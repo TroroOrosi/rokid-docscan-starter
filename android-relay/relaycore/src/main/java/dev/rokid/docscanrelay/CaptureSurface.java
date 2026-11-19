@@ -74,7 +74,20 @@ public interface CaptureSurface {
     /** Stops the viewfinder and its sensors outside capture or during an idle pause. */
     default void pausePreview() { }
 
+    /**
+     * As {@link #pausePreview}, when the wearer cleared the display and comes back to the page in view: a page that
+     * is being taken and is not whole yet is dropped (the camera answers that nothing was taken) and taken on return.
+     */
+    default void pauseForReturn() { pausePreview(); }
+
     default void resetPageDetection() { }
+
+    /**
+     * What is in view when the watching next settles is not a page to take; the page is the next view that differs
+     * from it and lies still. Asked when pages are to be taken again after the capture had ended: the wearer has not
+     * opened the page yet.
+     */
+    default void passOverViewInHand() { }
 
     /** Internal camera identity, deliberately separate from the unchanged upload provenance schema. */
     record NativeScene(String camera, long stream, long sequence, String captureId, String sha256) {

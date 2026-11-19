@@ -93,7 +93,10 @@ final class AnswerView extends View {
             body = reader.diagram() == null ? new ArrayList<>(page.lines) : Collections.emptyList();
             continuedFromPreviousLine = reader.diagram() == null ? page.continuedFromPreviousLine : Collections.emptyList();
             spoken = reader.diagram() == null ? page.sourceText : reader.diagram().alt;
-            index = reader.current().readingLabel() + "  " + reader.pageNumber() + "/" + reader.pageCount();
+            // The retake screen has a name of its own; a trailing mark says a second read is still being compared.
+            String label = reader.indexLabel();
+            index = (label.isEmpty() ? "" : label + "  ") + reader.pageNumber() + "/" + reader.pageCount()
+                    + (reader.comparing() ? " …" : "");
         } else {
             // On the index screens there is no answer to keep apart, so the
             // prompt belongs to the spoken text: it says what is being chosen.

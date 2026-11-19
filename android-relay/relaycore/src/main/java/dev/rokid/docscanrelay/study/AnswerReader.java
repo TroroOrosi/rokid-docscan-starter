@@ -1,6 +1,8 @@
 package dev.rokid.docscanrelay.study;
 
 import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.Collections;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
@@ -25,6 +27,19 @@ public final class AnswerReader {
     private final boolean continuous;
     private final List<ContinuousSection> sections = new ArrayList<>();
     private int continuousPageCount;
+    // Continuous reading shows the questions in an order of its own: the certain answers, the screen that says
+    // what to photograph again, what is not certain, the answers the wearer already had. The bundle's order stays
+    // the questions' identity; these say where each one is shown.
+    private static final String RETAKE = "再撮影";
+    /** Bundle index to place in the display order; -1 for a question that is not shown. */
+    private int[] entryOf;
+    /** Place in the display order to bundle index. */
+    private int[] questionOf;
+    /** The place of the one screen that belongs to no question (what to retake, or "no answer"), or -1. */
+    private int pseudoEntry;
+    private int pseudoPage;
+    /** The reader stands on the retake screen; its place is kept as a neighbouring question. */
+    private boolean onRetake;
 
     public AnswerReader(AnswerBundle bundle, float width, int lines, AnswerLayout.Measurer measurer) {
         this(bundle, width, lines, measurer, false);
@@ -40,11 +55,78 @@ public final class AnswerReader {
     public AnswerReader(AnswerBundle bundle, boolean continuous) {
         this.bundle = bundle;
         this.continuous = continuous;
+        arrange();
+        firstScreen();
+    }
+
+    /** 0 certain, 2 not certain, 3 already had; -1 not shown: a notice, or a question whose pages are to be retaken. */
+    private static int part(AnswerItem item) {
+        if (item.notice() || item.status == AnswerItem.Status.NEEDS_INPUT) return -1;
+        if (item.status != AnswerItem.Status.READY) return 2;
+        return item.seen ? 3 : 0;
+    }
+
+    /** The display order; it needs no viewport, so a saved place can be settled before a view has a size. */
+    private void arrange() {
+        if (!continuous) return;
+        int size = bundle.items.size();
+        entryOf = new int[size];
+        Arrays.fill(entryOf, -1);
+        int[] order = new int[size + 1];
+        int count = 0;
+        pseudoEntry = -1;
+        for (int part = 0; part < 4; part++) {
+            if (part == 1) {
+                if (!bundle.retake.isEmpty()) pseudoEntry = count++;
+                continue;
+            }
+            for (int i = 0; i < size; i++) {
+                if (part(bundle.items.get(i)) == part) {
+                    entryOf[i] = count;
+                    order[count++] = i;
+                }
+            }
+        }
+        if (count == 0) pseudoEntry = count++;
+        // A place on that screen is kept as the question shown just before it, else the one after it.
+        if (pseudoEntry >= 0) order[pseudoEntry] = pseudoEntry > 0 ? order[pseudoEntry - 1] : count > 1 ? order[1] : 0;
+        questionOf = Arrays.copyOf(order, count);
+    }
+
+    private void firstScreen() {
+        questionIndex = continuous ? questionOf[0] : 0;
+        anchorOffset = 0;
+        onRetake = continuous && pseudoEntry == 0 && !bundle.retake.isEmpty();
+    }
+
+    /** A question that is not shown gives its place to the nearest shown one before it, else to the first screen. */
+    private void settle() {
+        if (!continuous) return;
+        onRetake = onRetake && !bundle.retake.isEmpty();
+        if (onRetake) {
+            questionIndex = questionOf[pseudoEntry];
+            anchorOffset = 0;
+        } else if (entryOf[questionIndex] < 0) {
+            int earlier = questionIndex - 1;
+            while (earlier >= 0 && entryOf[earlier] < 0) earlier--;
+            if (earlier < 0) { firstScreen(); return; }
+            questionIndex = earlier;
+            anchorOffset = 0;
+        }
     }
 
     public AnswerBundle bundle() { return bundle; }
     public boolean hasViewport() { return measurer != null; }
     public AnswerItem current() { return bundle.items.get(questionIndex); }
+    /** Capture pages (1-based) the wearer should photograph again. */
+    public List<Integer> retakePages() { return bundle.retake; }
+    /** A second read is still being compared with these answers. */
+    public boolean comparing() { return bundle.comparing; }
+    /** What the index row names: the question at the top of the screen, or the screen that belongs to none. */
+    public String indexLabel() {
+        if (onRetake) return RETAKE;
+        return continuous && entryOf[questionIndex] < 0 ? "" : current().readingLabel();
+    }
     public Screen screen() { return screen; }
     public int offset() { return anchorOffset; }
     public int pageNumber() { return pageIndex + 1; }
@@ -72,7 +154,6 @@ public final class AnswerReader {
     }
 
     private int pageStart() {
-        if (continuous) return sectionAt(pageIndex).offset(pageIndex);
         return pageIndex < textPageCount ? pages.get(pageIndex).start
                 : contentLength + 1 + pageIndex - textPageCount;
     }
@@ -121,9 +202,14 @@ public final class AnswerReader {
         String content;
         switch (item.status) {
             case READY: content = item.answer; break;
-            // The warning comes first so the operator knows the answer is
-            // incomplete before copying it, and the answer still follows.
-            case NEEDS_REVIEW: content = "【要確認】" + item.issue + "\n" + item.answer; break;
+            // Continuous reading marks the row with ？ and gives the other read's answer, with no sentence
+            // (operator, 2026-11-19). The reader with menus, which no screen of the app uses, warns first so
+            // the operator knows the answer is incomplete before copying it, and the answer still follows.
+            case NEEDS_REVIEW:
+                content = !continuous ? "【要確認】" + item.issue + "\n" + item.answer
+                        : item.other.trim().isEmpty() ? item.answer : item.answer + "｜" + item.other;
+                break;
+            // Not shown in continuous reading: its pages are on the retake screen.
             case NEEDS_INPUT: content = "資料不足\n" + item.issue; break;
             case FAILED: content = "解析できません\n" + item.issue; break;
             default: content = "解析中"; break;
@@ -132,78 +218,105 @@ public final class AnswerReader {
         return content;
     }
 
-    /** Pack adjacent text answers; figures remain separate pages in their original order. */
+    /**
+     * Pack adjacent text answers in the display order; a figure remains a page of its own behind its answer, and
+     * the screen that belongs to no question stands alone.
+     */
     private void reflowContinuous() {
-        int targetQuestion = questionIndex;
-        int targetOffset = anchorOffset;
         sections.clear();
         continuousPageCount = 0;
         int first = 0;
-        while (first < bundle.items.size()) {
+        while (first < questionOf.length) {
+            boolean pseudo = first == pseudoEntry;
             int last = first;
-            while (last + 1 < bundle.items.size() && bundle.items.get(last).diagrams.isEmpty()) last++;
+            while (!pseudo && last + 1 < questionOf.length && last + 1 != pseudoEntry
+                    && bundle.items.get(questionOf[last]).diagrams.isEmpty()) last++;
             StringBuilder text = new StringBuilder();
             int[] starts = new int[last - first + 1];
             int[] bodyStarts = new int[starts.length];
             int lastContentLength = 0;
             int lineStart = 0;
             boolean previousCompact = false;
-            for (int i = first; i <= last; i++) {
-                AnswerItem item = bundle.items.get(i);
+            boolean previousSeen = false;
+            List<AnswerDiagram> diagrams = Collections.emptyList();
+            if (pseudo) {
+                pseudoPage = continuousPageCount;
+                text.append(bundle.retake.isEmpty() ? "解答なし" : retakeText());
+            }
+            for (int entry = first; !pseudo && entry <= last; entry++) {
+                AnswerItem item = bundle.items.get(questionOf[entry]);
                 String body = content(item);
-                String label = item.readingLabel();
+                String label = (item.status == AnswerItem.Status.NEEDS_REVIEW ? "？" : "") + item.readingLabel();
                 boolean compact = item.status == AnswerItem.Status.READY && item.diagrams.isEmpty()
                         && !body.contains("\n") && !body.contains("\r");
-                String entry = compact ? label + " " + body : "";
-                compact = compact && measurer.width(entry) <= width;
-                if (i > first) {
-                    if (previousCompact && compact
-                            && measurer.width(text.substring(lineStart) + "　" + entry) <= width) {
+                String row = compact ? label + " " + body : "";
+                compact = compact && measurer.width(row) <= width;
+                if (entry > first) {
+                    // Answers the wearer already had begin a row of their own behind the others.
+                    if (previousCompact && compact && item.seen == previousSeen
+                            && measurer.width(text.substring(lineStart) + "　" + row) <= width) {
                         text.append('　');
                     } else {
                         text.append('\n');
                         lineStart = text.length();
                     }
                 }
-                starts[i - first] = text.length();
+                starts[entry - first] = text.length();
                 text.append(label).append(' ');
-                bodyStarts[i - first] = text.length();
+                bodyStarts[entry - first] = text.length();
                 text.append(body);
                 lastContentLength = body.length();
                 previousCompact = compact;
+                previousSeen = item.seen;
+                diagrams = item.diagrams;
             }
-            AnswerItem item = bundle.items.get(last);
             String sectionText = text.toString();
             // The line index may be large, so release the mutable text buffer first.
             text = null;
-            ContinuousSection section = new ContinuousSection(first, continuousPageCount,
+            ContinuousSection section = new ContinuousSection(first, continuousPageCount, pseudo,
                     AnswerLayout.paginate(sectionText, width, lines, measurer),
-                    starts, bodyStarts, lastContentLength, item.diagrams);
+                    starts, bodyStarts, lastContentLength, diagrams);
             sections.add(section);
-            continuousPageCount += section.pages.size() + item.diagrams.size();
+            continuousPageCount += section.pages.size() + diagrams.size();
             first = last + 1;
         }
-        pageIndex = 0;
+        pageIndex = onRetake ? pseudoPage : 0;
+        if (onRetake) return;
+        // Pages rise with the place in the display order, not with the bundle index.
+        int target = entryOf[questionIndex];
         int low = 0;
         int high = continuousPageCount - 1;
         while (low <= high) {
             int middle = low + (high - low) / 2;
             ContinuousSection section = sectionAt(middle);
-            int owner = section.question(middle);
-            if (owner < targetQuestion || (owner == targetQuestion
-                    && section.offset(middle) <= targetOffset)) {
+            int owner = section.entry(middle);
+            if (owner < target || (owner == target && section.offset(middle) <= anchorOffset)) {
                 pageIndex = middle;
                 low = middle + 1;
             } else high = middle - 1;
         }
-        questionIndex = targetQuestion;
-        anchorOffset = targetOffset;
+    }
+
+    /** "再撮影 3・8・9": a row ends between two page numbers, never inside one. */
+    private String retakeText() {
+        StringBuilder text = new StringBuilder(RETAKE).append(' ');
+        int lineStart = 0;
+        for (int i = 0; i < bundle.retake.size(); i++) {
+            String number = bundle.retake.get(i) + (i + 1 < bundle.retake.size() ? "・" : "");
+            if (text.length() > lineStart && measurer.width(text.substring(lineStart) + number) > width) {
+                text.append('\n');
+                lineStart = text.length();
+            }
+            text.append(number);
+        }
+        return text.append("\nダブルタップで撮影").toString();
     }
 
     private void selectContinuousPage() {
         ContinuousSection section = sectionAt(pageIndex);
-        questionIndex = section.question(pageIndex);
-        anchorOffset = section.offset(pageIndex);
+        questionIndex = questionOf[section.entry(pageIndex)];
+        anchorOffset = section.pseudo ? 0 : section.offset(pageIndex);
+        onRetake = section.pseudo && !bundle.retake.isEmpty();
     }
 
     private ContinuousSection sectionAt(int page) {
@@ -219,19 +332,23 @@ public final class AnswerReader {
 
     /** Store question boundaries once; page text and ownership are resolved on demand. */
     private static final class ContinuousSection {
-        final int firstQuestion;
+        /** Place of its first question in the display order. */
+        final int firstEntry;
         final int firstPage;
+        /** The screen that belongs to no question. */
+        final boolean pseudo;
         final List<AnswerLayout.Page> pages;
         final int[] starts;
         final int[] bodyStarts;
         final int lastContentLength;
         final List<AnswerDiagram> diagrams;
 
-        ContinuousSection(int firstQuestion, int firstPage, List<AnswerLayout.Page> pages,
+        ContinuousSection(int firstEntry, int firstPage, boolean pseudo, List<AnswerLayout.Page> pages,
                           int[] starts, int[] bodyStarts, int lastContentLength,
                           List<AnswerDiagram> diagrams) {
-            this.firstQuestion = firstQuestion;
+            this.firstEntry = firstEntry;
             this.firstPage = firstPage;
+            this.pseudo = pseudo;
             this.pages = pages;
             this.starts = starts;
             this.bodyStarts = bodyStarts;
@@ -250,10 +367,10 @@ public final class AnswerReader {
             return low;
         }
 
-        int question(int globalPage) {
+        int entry(int globalPage) {
             int localPage = globalPage - firstPage;
             int index = localPage < pages.size() ? owner(pages.get(localPage).start) : starts.length - 1;
-            return firstQuestion + index;
+            return firstEntry + index;
         }
 
         int offset(int globalPage) {
@@ -268,7 +385,7 @@ public final class AnswerReader {
         if (!bundle.sessionId.equals(next.sessionId) || !bundle.inputDigest.equals(next.inputDigest)
                 || next.revision <= bundle.revision) return false;
         boolean sameShape = next.items.size() == bundle.items.size();
-        boolean changed = false;
+        boolean changed = continuous && !bundle.retake.equals(next.retake);
         for (int i = 0; sameShape && i < bundle.items.size(); i++) {
             AnswerItem old = bundle.items.get(i);
             AnswerItem item = next.items.get(i);
@@ -279,7 +396,8 @@ public final class AnswerReader {
             if (continuous || i == questionIndex) {
                 changed = changed || !old.answer.equals(item.answer)
                         || old.status != item.status || !old.issue.equals(item.issue)
-                        || !old.diagrams.equals(item.diagrams);
+                        || !old.diagrams.equals(item.diagrams) || !old.other.equals(item.other)
+                        || old.seen != item.seen;
             }
         }
         if (!sameShape) {
@@ -291,7 +409,7 @@ public final class AnswerReader {
             Map<String, Integer> places = new HashMap<>();
             for (int i = 0; i < next.items.size(); i++) places.put(next.items.get(i).questionId, i);
             int last = -1;
-            int stay = 0;
+            int stay = -1;
             boolean here = false;
             for (int i = 0; i < bundle.items.size(); i++) {
                 AnswerItem old = bundle.items.get(i);
@@ -306,8 +424,13 @@ public final class AnswerReader {
                 if (i <= questionIndex) { stay = place; here = i == questionIndex; }
             }
             bundle = next;
-            questionIndex = stay;
-            if (!here) anchorOffset = 0;
+            arrange();
+            if (stay < 0) firstScreen();
+            else {
+                questionIndex = stay;
+                if (!here) anchorOffset = 0;
+                settle(); // the question may have stopped being shown, or moved to another section
+            }
             screen = Screen.ANSWER;
             menuIndex = 0;
             menuGroup = null;
@@ -315,7 +438,11 @@ public final class AnswerReader {
             return true;
         }
         bundle = next;
-        if (changed) reflow();
+        if (changed) {
+            arrange();
+            settle();
+            reflow();
+        }
         return true;
     }
 
@@ -324,6 +451,11 @@ public final class AnswerReader {
             if (bundle.items.get(i).questionId.equals(questionId)) {
                 questionIndex = i;
                 anchorOffset = Math.max(0, offset);
+                onRetake = false;
+                // A reading not yet begun is saved as the bundle's first question at its start (AnswerStore.start):
+                // that is the first screen, wherever that question is shown.
+                if (i == 0 && anchorOffset == 0) firstScreen();
+                else settle();
                 reflow();
                 if (continuous || !hasViewport()) return;
                 anchorOffset = Math.min(anchorOffset, contentLength + current().diagrams.size());
@@ -335,11 +467,16 @@ public final class AnswerReader {
     public void forward() {
         if (screen != Screen.ANSWER) {
             menuIndex = Math.min(menuIndex + 1, menuChoices().size() - 1);
+        } else if (continuous) {
+            // Past the last screen comes the first (operator, 2026-11-19).
+            if (pageCount() > 1) {
+                pageIndex = (pageIndex + 1) % pageCount();
+                selectContinuousPage();
+            }
         } else if (pageIndex + 1 < pageCount()) {
             pageIndex++;
-            if (continuous) { selectContinuousPage(); return; }
             anchorOffset = pageStart();
-        } else if (!continuous && questionIndex + 1 < bundle.items.size()) {
+        } else if (questionIndex + 1 < bundle.items.size()) {
             questionIndex++;
             anchorOffset = 0;
             reflow();
@@ -349,11 +486,15 @@ public final class AnswerReader {
     public void backward() {
         if (screen != Screen.ANSWER) {
             menuIndex = Math.max(menuIndex - 1, 0);
+        } else if (continuous) {
+            if (pageCount() > 1) {
+                pageIndex = (pageIndex + pageCount() - 1) % pageCount();
+                selectContinuousPage();
+            }
         } else if (pageIndex > 0) {
             pageIndex--;
-            if (continuous) { selectContinuousPage(); return; }
             anchorOffset = pageStart();
-        } else if (!continuous && questionIndex > 0) {
+        } else if (questionIndex > 0) {
             questionIndex--;
             reflow();
             pageIndex = pageCount() - 1;

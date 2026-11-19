@@ -864,6 +864,50 @@ public class ClipCameraTest {
         assertEquals(1, device().configurations);
     }
 
+    @Test public void a_tap_to_clear_the_display_drops_a_clip_too_short_to_be_a_page_and_the_page_is_recorded_on_return() {
+        // The operator's second booklet of 2026-11-19, page 3: a tap three seconds into a recording. The clip had 2
+        // still frames of 52; it was kept as the page, could not be placed on the phone and went out as one frame.
+        // The wearer comes back to that page: it is recorded again then, whole. (An end keeps what there is: the
+        // phone then asks for the page again, and nothing the wearer looked at is missing from the booklet.)
+        watching(); recording();
+        clipFrames(10, 0);
+        camera.pauseForReturn(); idle(0);
+        idleSession(1); idle(0);
+        assertTrue("four still frames are no page", pages.isEmpty());
+        assertTrue(failures.isEmpty());
+        assertEquals("the controller is told that nothing was taken", 1, notReady);
+        assertArrayEquals("nothing is left in the inbox", new String[0], inboxDirectory.list());
+        AtomicInteger ready = new AtomicInteger();
+        camera.awaitNextPage(ready::incrementAndGet); idle(100);
+        light(50_000_000L, 800, 423, CONTROL_AE_STATE_CONVERGED);
+        watchFrame(false); idle(400); watchFrame(false);
+        assertEquals("the page that was in view is offered again without being turned", 1, ready.get());
+    }
+
+    @Test public void a_tap_to_clear_the_display_keeps_a_clip_that_has_enough_still_frames() {
+        watching(); recording();
+        clipFrames(ClipCamera.SETTLE_FRAMES + 40, 0); // two thirds of the sixty: what a clip that ran out its time is kept from
+        camera.pauseForReturn(); idle(0);
+        idleSession(1); idle(0);
+        assertEquals(1, pages.size());
+        assertEquals(0, notReady);
+    }
+
+    @Test public void the_view_in_hand_when_pages_are_asked_for_again_is_not_taken_and_the_one_turned_to_is() {
+        // On the desk, 2026-11-19: 0.7 s after the pages to take again came up, what lay in view was recorded as the
+        // first of them. A wearer is looking at the answers or the answer sheet at that moment and has not opened the
+        // page yet. The view in hand counts as seen; the page is the next view that differs from it and lies still.
+        AtomicInteger ready = new AtomicInteger();
+        camera.resetPages();
+        camera.passOverViewInHand();
+        camera.awaitNextPage(ready::incrementAndGet); idle(100);
+        light(50_000_000L, 800, 423, CONTROL_AE_STATE_CONVERGED);
+        watchFrame(false); idle(400); watchFrame(false); idle(400); watchFrame(false); idle(400); watchFrame(false);
+        assertEquals("what was in view when the pages were asked for is not offered", 0, ready.get());
+        idle(100); watchFrame(true); idle(500); watchFrame(true);
+        assertEquals("the page turned to is", 1, ready.get());
+    }
+
     @Test public void a_pause_before_any_frame_has_counted_drops_the_clip() {
         watching(); recording();
         clipFrames(3, 0);
@@ -951,12 +995,35 @@ public class ClipCameraTest {
         assertEquals("the camera goes on, as after any failed capture", 2, ManagerShadow.devices.size());
     }
 
-    @Test public void an_encoder_that_cannot_be_opened_is_a_failed_capture_before_any_session_change() {
+    @Test public void an_encoder_that_cannot_be_opened_once_does_not_end_the_capture_and_the_page_is_looked_for_again() {
+        // The first clip after the glasses had restarted, 2026-11-19: the hardware encoder's start ran out its three
+        // seconds (MediaCodec$CodecException: start failed). It was a failed capture at once and the wearer was told
+        // to restart the app. Nothing has been asked of the camera at that point: the page is looked for again, as
+        // after a camera error, and the encoder is opened again for it.
         watching();
         encoder.openFailure = new IOException("no codec");
         camera.captureOnce(); idle(0);
-        assertEquals(List.of("encoder java.io.IOException: no codec"), failures);
-        assertEquals(1, device().configurations);
+        assertTrue("not a failed capture", failures.isEmpty());
+        assertEquals("the controller is told that nothing was taken", 1, notReady);
+        assertEquals("the watch session stays as it is", 1, device().configurations);
+        assertFalse(device().closed);
+        assertArrayEquals("nothing is left in the inbox", new String[0], inboxDirectory.list());
+        encoder.openFailure = null;
+        AtomicInteger ready = new AtomicInteger();
+        camera.awaitNextPage(ready::incrementAndGet); idle(100);
+        light(50_000_000L, 800, 423, CONTROL_AE_STATE_CONVERGED);
+        watchFrame(false); idle(400); watchFrame(false);
+        assertEquals("the page that was in view is offered again without being turned", 1, ready.get());
+    }
+
+    @Test public void an_encoder_that_cannot_be_opened_three_times_with_no_page_between_fails_the_capture() {
+        watching();
+        encoder.openFailure = new IOException("no codec");
+        for (int attempt = 1; attempt <= 3; attempt++) {
+            camera.captureOnce(); idle(0);
+            assertEquals(attempt < 3 ? List.of() : List.of("encoder java.io.IOException: no codec"), failures);
+        }
+        assertEquals(2, notReady);
         idleSession(0);
         assertTrue(device().closed);
         assertArrayEquals(new String[0], inboxDirectory.list());

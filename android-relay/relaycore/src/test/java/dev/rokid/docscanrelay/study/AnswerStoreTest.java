@@ -30,6 +30,20 @@ public class AnswerStoreTest {
         assertEquals(300_001, saved.offset);
     }
 
+    @Test public void retakePagesComparingTheOtherReadAndSeenSurviveOfflineRestart() throws Exception {
+        File directory = temp.newFolder();
+        AnswerBundle bundle = new AnswerBundle("s", "a".repeat(64), 1, List.of(
+                new AnswerItem("g", "全問", "q1", "1", "ア", AnswerItem.Status.READY, "", List.of(), List.of(), "", true),
+                new AnswerItem("g", "全問", "q2", "2", "イ", AnswerItem.Status.NEEDS_REVIEW, "2回の読みで不一致",
+                        List.of(), List.of(), "ウ", false)), "single", "complete", List.of(3, 8), true);
+        new AnswerStore(directory).start(bundle);
+        AnswerBundle saved = new AnswerStore(directory).load().bundle;
+        assertEquals(List.of(3, 8), saved.retake);
+        assertTrue(saved.comparing);
+        assertTrue(saved.items.get(0).seen);
+        assertEquals("ウ", saved.items.get(1).other);
+    }
+
     private AnswerBundle bundle(String session) {
         return new AnswerBundle(session, "a".repeat(64), 1, List.of(
                 AnswerItem.ready("g1", "大問1", "q1", "(1)", "書く内容だけ。".repeat(100))));

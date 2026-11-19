@@ -147,6 +147,92 @@ public class AnswerBundleTest {
         assertEquals(bundle.toJson(), AnswerBundle.fromJson(bundle.toJson()).toJson());
     }
 
+    private static AnswerItem item(String id, String answer, AnswerItem.Status status, String issue,
+                                   String other, boolean seen) {
+        return new AnswerItem("g1", "大問1", id, id, answer, status, issue, List.of(), List.of(), other, seen);
+    }
+
+    @Test public void retakePagesComparingTheOtherReadAndSeenSurviveTheOfflineRoundTripAndAnUpdate() throws Exception {
+        AnswerBundle bundle = new AnswerBundle("s", digest, 1, List.of(
+                item("q1", "ア", AnswerItem.Status.READY, "", "", true),
+                item("q2", "イ", AnswerItem.Status.NEEDS_REVIEW, "2回の読みで不一致", "ウ", false)),
+                "single", "complete", List.of(3, 8, 9), true);
+        AnswerBundle restored = AnswerBundle.fromJson(bundle.toJson());
+        assertEquals(List.of(3, 8, 9), restored.retake);
+        assertTrue(restored.comparing);
+        assertTrue(restored.items.get(0).seen);
+        assertEquals("", restored.items.get(0).other);
+        assertFalse(restored.items.get(1).seen);
+        assertEquals("ウ", restored.items.get(1).other);
+        assertEquals(bundle.toJson(), restored.toJson());
+        assertThrows(UnsupportedOperationException.class, () -> restored.retake.add(1));
+
+        AnswerBundle next = restored.withAnswer(item("q1", "エ", AnswerItem.Status.READY, "", "", false));
+        assertEquals(List.of(3, 8, 9), next.retake);
+        assertTrue(next.comparing);
+        assertEquals("ウ", next.items.get(1).other);
+    }
+
+    @Test public void aBundleWithoutTheNewFieldsLoadsWithNothingToRetakeAndNothingCompared() throws Exception {
+        AnswerBundle old = AnswerBundle.fromJson("{\"schema_version\":1,\"session_id\":\"s\",\"input_digest\":\""
+                + digest + "\",\"revision\":1,\"items\":[{\"group_id\":\"g\",\"group_label\":\"全問\","
+                + "\"question_id\":\"q\",\"question_label\":\"1\",\"answer\":\"A\",\"status\":\"ready\",\"issue\":\"\"}]}");
+        assertTrue(old.retake.isEmpty());
+        assertFalse(old.comparing);
+        assertEquals("", old.items.get(0).other);
+        assertFalse(old.items.get(0).seen);
+        assertFalse(old.items.get(0).notice());
+    }
+
+    @Test public void anOlderServersComparingNoticeMeansTheReadsAreStillCompared() throws Exception {
+        AnswerItem notice = new AnswerItem("pages", "撮影の確認", "read-comparing", "照合中", "（待ち）",
+                AnswerItem.Status.NEEDS_REVIEW, "1回目の読み");
+        assertTrue(notice.notice());
+        AnswerBundle bundle = new AnswerBundle("s", digest, 1,
+                List.of(AnswerItem.ready("g", "全問", "q", "1", "A"), notice));
+        assertTrue(bundle.comparing);
+        assertTrue(AnswerBundle.fromJson(bundle.toJson()).comparing);
+    }
+
+    @Test public void theOtherReadBelongsOnlyToAnAnswerInDoubt() {
+        assertEquals("", item("q1", "ア", AnswerItem.Status.READY, "", "ウ", false).other);
+        assertEquals("x".repeat(200),
+                item("q1", "ア", AnswerItem.Status.NEEDS_REVIEW, "確認", "x".repeat(200), false).other);
+    }
+
+    @Test public void outOfRangeRetakePagesOtherReadsAndFlagsAreRefused() throws Exception {
+        List<AnswerItem> items = List.of(AnswerItem.ready("g", "全問", "q", "1", "A"));
+        for (List<Integer> pages : List.of(List.of(0), List.of(1001), java.util.Collections.nCopies(101, 1))) {
+            assertThrows(IllegalArgumentException.class,
+                    () -> new AnswerBundle("s", digest, 1, items, "single", "complete", pages, false));
+        }
+        assertEquals(100, new AnswerBundle("s", digest, 1, items, "single", "complete",
+                java.util.Collections.nCopies(100, 1000), false).retake.size());
+        assertThrows(IllegalArgumentException.class,
+                () -> item("q1", "ア", AnswerItem.Status.NEEDS_REVIEW, "確認", "x".repeat(201), false));
+        assertThrows(IllegalArgumentException.class,
+                () -> item("q1", "ア", AnswerItem.Status.NEEDS_REVIEW, "確認", null, false));
+
+        String valid = new AnswerBundle("s", digest, 1, items).toJson();
+        for (String pages : List.of("[0]", "[1001]", "[\"3\"]", "[1.5]", "[null]",
+                new org.json.JSONArray(java.util.Collections.nCopies(101, 1)).toString())) {
+            String json = new JSONObject(valid).put("retake", new org.json.JSONArray(pages)).toString();
+            assertThrows(pages, Exception.class, () -> AnswerBundle.fromJson(json));
+        }
+        for (Object flag : new Object[]{"true", 1, JSONObject.NULL}) {
+            String json = new JSONObject(valid).put("comparing", flag).toString();
+            assertThrows("comparing " + flag, Exception.class, () -> AnswerBundle.fromJson(json));
+            JSONObject seen = new JSONObject(valid);
+            seen.getJSONArray("items").getJSONObject(0).put("seen", flag);
+            assertThrows("seen " + flag, Exception.class, () -> AnswerBundle.fromJson(seen.toString()));
+        }
+        for (Object other : new Object[]{5, JSONObject.NULL, "x".repeat(201)}) {
+            JSONObject json = new JSONObject(valid);
+            json.getJSONArray("items").getJSONObject(0).put("other", other);
+            assertThrows("other " + other, Exception.class, () -> AnswerBundle.fromJson(json.toString()));
+        }
+    }
+
     @Test public void reviewWithoutAReasonOrWithoutAnAnswerIsRejected() {
         assertThrows(IllegalArgumentException.class, () -> new AnswerItem(
                 "g1", "大問1", "q1", "問1", "12", AnswerItem.Status.NEEDS_REVIEW, "  "));

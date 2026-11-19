@@ -222,6 +222,17 @@ final class LocalCaptureSession {
      * the wait (a double tap twice, a fold, the glasses taken off and on) it used to count as finished, was listed
      * nowhere, and its answers could not be reached (register 3-1; met by the operator on 2026-11-17).
      */
+    /** Whether the phone has been asked, once this reading, which pages to take again (DocScanController.queueLocalUpload). */
+    synchronized boolean captureChecked() { return Boolean.parseBoolean(state.getProperty("capture.checked", "false")); }
+    synchronized void setCaptureChecked() throws IOException { if (!captureChecked()) update("capture.checked", "true"); }
+    /**
+     * Pages are being taken again after the answers were read and the phone has not been told yet: it has to open the
+     * booklet again before the first of them is sent (DocScanController.queueLocalUpload).
+     */
+    synchronized boolean retakeReopen() { return Boolean.parseBoolean(state.getProperty("retake.reopen", "false")); }
+    synchronized void setRetakeReopen(boolean value) throws IOException {
+        if (retakeReopen() != value) update("retake.reopen", Boolean.toString(value));
+    }
     synchronized boolean answersPending() { return Boolean.parseBoolean(state.getProperty("answers.pending", "false")); }
     synchronized void answersArrived() throws IOException { if (answersPending()) update("answers.pending", "false"); }
 

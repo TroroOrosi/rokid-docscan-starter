@@ -380,6 +380,37 @@ public class AnswerViewTest {
         assertEquals(font, view.bodyTextSize(), 0.001f);
     }
 
+    @Test public void theIndexRowNamesTheRetakeScreenAndMarksAnswersStillBeingCompared() {
+        List<AnswerItem> items = List.of(AnswerItem.ready("g1", "大問1", "q1", "(1)", "イ"));
+        AnswerReader reader = new AnswerReader(new AnswerBundle("s", "a".repeat(64), 1, items,
+                "single", "complete", List.of(3, 8), true), true);
+        AnswerView view = new AnswerView(RuntimeEnvironment.getApplication());
+        view.bind(reader);
+        view.layout(0, 0, 480, 640);
+        assertEquals("大問1 (1)  1/2 …", org.robolectric.util.ReflectionHelpers.getField(view, "index"));
+        assertEquals("大問1 (1) イ", view.getContentDescription().toString());
+
+        reader.forward();
+        view.refresh();
+        assertEquals("再撮影  2/2 …", org.robolectric.util.ReflectionHelpers.getField(view, "index"));
+        assertEquals("再撮影 3・8\nダブルタップで撮影", view.getContentDescription().toString());
+
+        assertTrue(reader.accept(new AnswerBundle("s", "a".repeat(64), 2, items,
+                "single", "complete", List.of(3, 8), false)));
+        view.refresh();
+        assertEquals("再撮影  2/2", org.robolectric.util.ReflectionHelpers.getField(view, "index"));
+    }
+
+    @Test public void aReadingWithNothingToShowHasOnlyItsPageCountInTheIndexRow() {
+        AnswerReader reader = new AnswerReader(new AnswerBundle("s", "a".repeat(64), 1, List.of(
+                new AnswerItem("g1", "大問1", "q1", "(1)", "", AnswerItem.Status.NEEDS_INPUT, "下端がありません"))), true);
+        AnswerView view = new AnswerView(RuntimeEnvironment.getApplication());
+        view.bind(reader);
+        view.layout(0, 0, 480, 640);
+        assertEquals("1/1", org.robolectric.util.ReflectionHelpers.getField(view, "index"));
+        assertEquals("解答なし", view.getContentDescription().toString());
+    }
+
     @Test public void indexIsClearlySeparateFromTheWrittenAnswer() {
         AnswerView view = new AnswerView(RuntimeEnvironment.getApplication());
         view.layout(0, 0, 480, 640);

@@ -339,6 +339,11 @@ final class ClipCamera implements PageCamera {
         });
     }
 
+    /** The view that settles next is passed over (PageCamera); set and spent on the frames' and the camera's thread. */
+    private volatile boolean passOver;
+
+    @Override public void passOverViewInHand() { handler.post(() -> passOver = true); }
+
     /** One clip of the page in view; its middle frame arrives at the callback as the page. */
     @Override public void captureOnce() {
         handler.post(() -> {
@@ -362,7 +367,17 @@ final class ClipCamera implements PageCamera {
      * booklet and an end was left hanging. Only a clip in which no frame has counted yet is deleted, and the
      * session told that nothing was taken. The camera is closed once its session is idle.
      */
-    @Override public void pausePreview() {
+    @Override public void pausePreview() { pause(false); }
+
+    /**
+     * A tap that clears the display: the wearer comes back to the page in view. A clip that has not yet the still
+     * frames a clip is kept from is dropped, and the page is recorded again on return. On 2026-11-19 a tap three
+     * seconds into a recording left a clip with 2 still frames of 52 as the page; the phone could not place it and
+     * the page went out as one frame.
+     */
+    @Override public void pauseForReturn() { pause(true); }
+
+    private void pause(boolean returning) {
         handler.post(() -> {
             wanted = false;
             pageReady = null;
@@ -371,7 +386,8 @@ final class ClipCamera implements PageCamera {
             Clip held = clip;
             boolean counted;
             synchronized (lock) {
-                counted = held != null && held.phase == RECORDING && held.counted > 0;
+                counted = held != null && held.phase == RECORDING && held.counted > 0
+                        && (!returning || held.counted * 3 >= options.targetFrames * 2);
             }
             if (counted) {
                 held.cut = true;
@@ -664,7 +680,16 @@ final class ClipCamera implements PageCamera {
             starting.opened = true;
             starting.openMillis = SystemClock.elapsedRealtime() - opening;
         } catch (IOException | RuntimeException error) {
-            fail("encoder " + error, null);
+            // Nothing has been asked of the camera yet. On 2026-11-19 the hardware encoder's start ran out its three
+            // seconds on the first clip after the glasses had restarted, and that was a failed capture at once
+            // ("restart the app"). The page is looked for again, as after a camera error, and the encoder opened
+            // again for it; the third time in a row with no page between, the capture fails as before.
+            if (++cameraFailures >= MAX_CAMERA_FAILURES) { fail("encoder " + error, null); return; }
+            UseLog.w(TAG, "clip encoder refused: " + error + " try=" + cameraFailures);
+            abandon();
+            pageChange = new PageChange(); // the page in view was not taken: it is seen as new
+            settlingSince = 0;
+            if (!closed) callback.onCaptureNotReady();
             return;
         }
         starting.phase = STARTING;
@@ -1160,7 +1185,12 @@ final class ClipCamera implements PageCamera {
                 }
                 callback.onPreview(Bitmap.createBitmap(display, shownWidth, shownHeight, Bitmap.Config.RGB_565), null);
             }
-            if (clip == null && pageReady != null && pageChange.ready(now)) {
+            if (clip == null && pageReady != null && passOver && pageChange.ready(now)) {
+                // Pages were asked for again and this is what was in view at that moment: seen, not taken.
+                passOver = false;
+                pageChange.consumed();
+                UseLog.i(TAG, "view_passed_over");
+            } else if (clip == null && pageReady != null && pageChange.ready(now)) {
                 Runnable ready = pageReady;
                 pageReady = null;
                 offered = true;

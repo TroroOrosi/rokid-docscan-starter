@@ -23,6 +23,10 @@ public final class AnswerItem {
     public final String issue;
     public final List<AnswerDiagram> diagrams;
     public final List<Integer> answerNumbers;
+    /** The other read's answer where two reads disagree; kept for NEEDS_REVIEW only, else "". */
+    public final String other;
+    /** The wearer already had this exact answer before pages were added. */
+    public final boolean seen;
 
     public AnswerItem(String groupId, String groupLabel, String questionId, String questionLabel,
                       String answer, Status status, String issue) {
@@ -37,6 +41,12 @@ public final class AnswerItem {
     public AnswerItem(String groupId, String groupLabel, String questionId, String questionLabel,
                       String answer, Status status, String issue, List<AnswerDiagram> diagrams,
                       List<Integer> answerNumbers) {
+        this(groupId, groupLabel, questionId, questionLabel, answer, status, issue, diagrams, answerNumbers, "", false);
+    }
+
+    public AnswerItem(String groupId, String groupLabel, String questionId, String questionLabel,
+                      String answer, Status status, String issue, List<AnswerDiagram> diagrams,
+                      List<Integer> answerNumbers, String other, boolean seen) {
         this.groupId = identifier(groupId);
         this.questionId = identifier(questionId);
         this.groupLabel = label(groupLabel);
@@ -47,12 +57,15 @@ public final class AnswerItem {
                 || issue.codePointCount(0, issue.length()) > 1000 || (carriesAnswer && answer.trim().isEmpty() && diagrams.isEmpty())
                 || (!carriesAnswer && !answer.isEmpty())
                 || (!carriesAnswer && !diagrams.isEmpty())
-                || (status == Status.NEEDS_REVIEW && issue.trim().isEmpty())) {
+                || (status == Status.NEEDS_REVIEW && issue.trim().isEmpty())
+                || other == null || other.codePointCount(0, other.length()) > 200) {
             throw new IllegalArgumentException("invalid written answer");
         }
         this.answer = answer;
         this.status = status;
         this.issue = status == Status.READY ? "" : issue;
+        this.other = status == Status.NEEDS_REVIEW ? other : "";
+        this.seen = seen;
         this.diagrams = Collections.unmodifiableList(new ArrayList<>(diagrams));
         if (answerNumbers == null || answerNumbers.size() > 1000 || answerNumbers.stream()
                 .anyMatch(n -> n == null || n <= 0 || n > 9999)) throw new IllegalArgumentException("invalid answer number");
@@ -70,6 +83,9 @@ public final class AnswerItem {
         for (Integer number : answerNumbers) labels.add(number.toString());
         return String.join(",", labels);
     }
+
+    /** A notice about the capture from an older server (照合中, 縮小, a page's own): not an answer, never shown. */
+    public boolean notice() { return "pages".equals(groupId); }
 
     public String heading() { return groupLabel + " " + (answerNumbers.isEmpty() ? questionLabel : readingLabel()); }
 

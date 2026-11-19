@@ -18,7 +18,17 @@ interface PageCamera {
 
     void pausePreview();
 
+    /** As {@link #pausePreview}, for a wearer who comes back to the page in view: what is not yet a page is dropped. */
+    default void pauseForReturn() { pausePreview(); }
+
     void resetPages();
+
+    /**
+     * What is in view when the watching next settles is not a page to take: the page is the next view that differs
+     * from it and lies still. For pages asked for again after the capture had ended, when the wearer has not opened
+     * the page yet. A camera that does not know this takes the view in hand, as at the start of a capture.
+     */
+    default void passOverViewInHand() { }
 
     /** Whether pages turned to during a review are photographed and kept; false makes the surface answer the same. */
     default boolean supportsFuturePages() { return true; }

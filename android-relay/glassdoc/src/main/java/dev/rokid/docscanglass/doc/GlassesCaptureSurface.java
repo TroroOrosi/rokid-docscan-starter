@@ -80,7 +80,14 @@ final class GlassesCaptureSurface implements CaptureSurface, ClipCamera.Marks {
         capturePreview(false);
     }
 
+    @Override public void pauseForReturn() {
+        if (camera != null) camera.pauseForReturn();
+        capturePreview(false);
+    }
+
     @Override public void resetPageDetection() { if (camera != null) camera.resetPages(); }
+
+    @Override public void passOverViewInHand() { if (camera != null) camera.passOverViewInHand(); }
 
     @Override public NativeScene nativeSelectionScene(CaptureProvenance source) {
         return closed || camera == null ? null : camera.nativeSelectionScene(source);
@@ -258,7 +265,8 @@ final class GlassesCaptureSurface implements CaptureSurface, ClipCamera.Marks {
     public long showCaptureAiming(int pageNumber, boolean retake, boolean stabilizing) {
         if (camera != null) camera.preview();
         capturePreview(true);
-        List<String> lines = List.of(Integer.toString(pageNumber));
+        // A page the reading already holds, taken again: its own number, marked (the operator, 2026-11-19).
+        List<String> lines = List.of((retake ? "再" : "") + pageNumber);
         return show(
                 stabilizing ? "capture-stabilizing" : "capture-aiming",
                 () -> hud.showAiming(lines));

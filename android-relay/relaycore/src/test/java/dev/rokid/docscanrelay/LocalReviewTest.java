@@ -526,7 +526,8 @@ public class LocalReviewTest {
                 assertLine("finalize_done ms=\\d+", useLog("finalize_done").get(0));
                 List<String> kinds = new java.util.ArrayList<>();
                 for (String line : useLog("upload_begin")) kinds.add(line.split(" ")[1]);
-                assertEquals(List.of("kind=document", "kind=page", "kind=finalize", "kind=exam", "kind=finalize_reading"), kinds);
+                // "check": the phone is asked which pages to take again before the booklet is finalized (2026-11-19).
+                assertEquals(List.of("kind=document", "kind=page", "kind=check", "kind=finalize", "kind=exam", "kind=finalize_reading"), kinds);
             } finally { controller.close(); }
         }
     }

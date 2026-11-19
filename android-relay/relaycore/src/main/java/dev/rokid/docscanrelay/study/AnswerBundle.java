@@ -33,6 +33,10 @@ public final class AnswerBundle {
     public final String analysisStage;
     public final String availableStage;
     public final List<AnswerItem> items;
+    /** Capture pages (1-based) the wearer should photograph again; empty for none. */
+    public final List<Integer> retake;
+    /** A second read is still being compared with these answers. */
+    public final boolean comparing;
 
     public AnswerBundle(String sessionId, String inputDigest, long revision, List<AnswerItem> items) {
         this(sessionId, inputDigest, revision, items, "single", "complete");
@@ -40,11 +44,21 @@ public final class AnswerBundle {
 
     public AnswerBundle(String sessionId, String inputDigest, long revision, List<AnswerItem> items,
                         String analysisStage, String availableStage) {
+        this(sessionId, inputDigest, revision, items, analysisStage, availableStage, Collections.emptyList(), false);
+    }
+
+    public AnswerBundle(String sessionId, String inputDigest, long revision, List<AnswerItem> items,
+                        String analysisStage, String availableStage, List<Integer> retake, boolean comparing) {
         this.sessionId = AnswerItem.identifier(sessionId);
         if (inputDigest == null || !inputDigest.matches("[a-f0-9]{64}") || revision < 1
                 || items == null || items.isEmpty() || items.size() > 2000) {
             throw new IllegalArgumentException("invalid answer bundle");
         }
+        if (retake == null || retake.size() > 100
+                || retake.stream().anyMatch(page -> page == null || page < 1 || page > 1000)) {
+            throw new IllegalArgumentException("invalid retake page");
+        }
+        this.retake = Collections.unmodifiableList(new ArrayList<>(retake));
         this.inputDigest = inputDigest;
         this.revision = revision;
         if (!List.of("single", "reading", "awaiting_audio", "listening", "complete").contains(analysisStage)
@@ -65,9 +79,12 @@ public final class AnswerBundle {
                 throw new IllegalArgumentException("inconsistent group label");
             }
             chars += item.answer.length() + item.issue.length();
+            // An older server says it with a notice item, which is not shown.
+            comparing = comparing || (item.notice() && item.questionId.equals("read-comparing"));
         }
         if (chars > MAX_TEXT_CHARS) throw new IllegalArgumentException("answer bundle too large");
         this.items = Collections.unmodifiableList(new ArrayList<>(items));
+        this.comparing = comparing;
     }
 
     public boolean fullyAnswered() {
@@ -92,7 +109,8 @@ public final class AnswerBundle {
                 throw new IllegalArgumentException("answer does not belong to this question");
             }
             next.set(i, replacement);
-            return new AnswerBundle(sessionId, inputDigest, Math.addExact(revision, 1), next, analysisStage, availableStage);
+            return new AnswerBundle(sessionId, inputDigest, Math.addExact(revision, 1), next, analysisStage,
+                    availableStage, retake, comparing);
         }
         throw new IllegalArgumentException("unknown question identity");
     }
@@ -119,12 +137,15 @@ public final class AnswerBundle {
         writer.beginObject().name("schema_version").value(schema)
                 .name("session_id").value(sessionId).name("input_digest").value(inputDigest)
                 .name("revision").value(revision).name("analysis_stage").value(analysisStage)
-                .name("available_stage").value(availableStage).name("items").beginArray();
+                .name("available_stage").value(availableStage).name("retake").beginArray();
+        for (Integer page : retake) writer.value(page);
+        writer.endArray().name("comparing").value(comparing).name("items").beginArray();
         for (AnswerItem item : items) {
             writer.beginObject().name("group_id").value(item.groupId).name("group_label").value(item.groupLabel)
                     .name("question_id").value(item.questionId).name("question_label").value(item.questionLabel)
                     .name("answer").value(item.answer).name("status").value(item.status.name().toLowerCase(Locale.ROOT))
-                    .name("issue").value(item.issue).name("diagrams");
+                    .name("issue").value(item.issue).name("other").value(item.other).name("seen").value(item.seen)
+                    .name("diagrams");
             AnswerJson.writeValue(writer, AnswerDiagram.encode(item.diagrams));
             writer.name("answer_no").beginArray();
             for (Integer number : item.answerNumbers) writer.value(number);
@@ -157,6 +178,8 @@ public final class AnswerBundle {
     static AnswerBundle readJson(JsonReader reader) throws IOException, JSONException {
         String session = null, digest = null, stage = "single", available = "complete";
         long schema = 0, revision = 0;
+        List<Integer> retake = new ArrayList<>();
+        boolean comparing = false;
         List<AnswerItem> items = null;
         long characters = 0;
         Set<String> fields = new HashSet<>();
@@ -171,6 +194,16 @@ public final class AnswerBundle {
                 case "revision": revision = AnswerJson.integer(reader); break;
                 case "analysis_stage": stage = AnswerJson.string(reader); break;
                 case "available_stage": available = AnswerJson.string(reader); break;
+                case "retake":
+                    reader.beginArray();
+                    while (reader.hasNext()) {
+                        long page = AnswerJson.integer(reader);
+                        if (retake.size() >= 100 || page < 1 || page > 1000) throw new JSONException("invalid retake page");
+                        retake.add((int) page);
+                    }
+                    reader.endArray();
+                    break;
+                case "comparing": comparing = AnswerJson.flag(reader); break;
                 case "items":
                     items = new ArrayList<>();
                     reader.beginArray();
@@ -181,7 +214,8 @@ public final class AnswerBundle {
                                 string(item, "question_id"), string(item, "question_label"), string(item, "answer"),
                                 AnswerItem.Status.valueOf(string(item, "status").toUpperCase(Locale.ROOT)),
                                 string(item, "issue"), AnswerDiagram.parse(item.has("diagrams")
-                                        ? item.getJSONArray("diagrams") : null), answerNumbers(item));
+                                        ? item.getJSONArray("diagrams") : null), answerNumbers(item),
+                                item.has("other") ? string(item, "other") : "", item.has("seen") && flag(item, "seen"));
                         characters += answer.answer.length() + answer.issue.length();
                         if (characters > MAX_TEXT_CHARS) throw new IOException("answer text too large");
                         items.add(answer);
@@ -194,7 +228,13 @@ public final class AnswerBundle {
         reader.endObject();
         if (schema != SCHEMA_VERSION && schema != 2 && schema != 3)
             throw new IllegalArgumentException("unsupported answer schema");
-        return new AnswerBundle(session, digest, revision, items, stage, available);
+        return new AnswerBundle(session, digest, revision, items, stage, available, retake, comparing);
+    }
+
+    private static boolean flag(JSONObject object, String key) throws JSONException {
+        Object value = object.get(key);
+        if (!(value instanceof Boolean)) throw new JSONException("invalid flag: " + key);
+        return (Boolean) value;
     }
 
     private static List<Integer> answerNumbers(JSONObject item) throws JSONException {

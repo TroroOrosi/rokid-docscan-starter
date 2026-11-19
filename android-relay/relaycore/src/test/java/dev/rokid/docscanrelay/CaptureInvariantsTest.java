@@ -50,7 +50,9 @@ import org.robolectric.shadows.ShadowSystemClock;
  * NOACK (it is not, and 3 s pass), HIDE (it is hidden; ACK shows it again), WAIT:n (n ms pass), PHOTO, UNRESOLVED,
  * NOTSTARTED and CAMERAFAIL (the camera's answer to a request), NOSTILL (the next still cannot be decoded for the
  * display), DOCUMENT (the phone has made the document), TAP, DOUBLETAP, SWIPE and BACKSWIPE (the wearer), A+B (a burst:
- * the controller's thread is held meanwhile), CLOSE (the closing script, which always runs last).</p>
+ * the controller's thread is held meanwhile), RETAKE:a,b (after an end: the phone names the pages, by index, that are
+ * not whole; they are taken again in place and the booklet then goes out by itself; drawn once a sequence), CLOSE (the
+ * closing script, which always runs last).</p>
  *
  * <p>What stands in for the glasses, each after its source in {@code android-relay/glassdoc}:</p>
  * <ul>
@@ -68,7 +70,7 @@ import org.robolectric.shadows.ShadowSystemClock;
  * <li>The controller's one thread being busy: a burst (A+B) is several of these while that thread is held.</li>
  * </ul>
  *
- * <p>Out of scope: the upload chain ({@code localUploadBlocked} keeps it from running, so a capture that has ended stays
+ * <p>Out of scope: the upload chain ({@code localNetworkBusy} keeps it from running, so a capture that has ended stays
  * at FINALIZING), clips, mixed English and listening, a reading taken up again, pages watched during a review
  * ({@code supportsFuturePages} is false, as on the glasses), and a store that fails to save (such a run is repeated).</p>
  */
@@ -84,6 +86,155 @@ public class CaptureInvariantsTest {
                 fail("seed " + seed + " violates " + found.broken + "\nsteps: " + found.steps
                         + "\nshortened: " + shorten(found));
             }
+        }
+    }
+
+    // ---- pages the phone asks for again before the booklet goes out (2026-11-19) ------------------------------------
+
+    private static final String[] ONE_PAGE = {"PAGE", "ACK", "ACK", "WAIT:1500", "PHOTO", "ACK", "WAIT:3100"};
+
+    private static void take(Capture capture, int pages) throws Exception {
+        for (int page = 0; page < pages; page++) for (String step : ONE_PAGE) assertStep(capture, step);
+    }
+
+    private static void assertStep(Capture capture, String step) throws Exception {
+        String broken = capture.step(step);
+        if (broken != null) fail(broken + "\nsteps: " + capture.done);
+    }
+
+    /** Which photo (counted from 1 in the order the camera delivered them) each saved page holds. */
+    private static List<Integer> photosOf(Capture capture) throws Exception {
+        List<Integer> held = new ArrayList<>();
+        for (int index = 0; index < capture.session.pageCount(); index++) {
+            held.add((int) capture.session.read(capture.session.page(index)).jpeg[1]);
+        }
+        return held;
+    }
+
+    /**
+     * The operator, 2026-11-19: a page that has to be taken again has to be found before GPT asks for it, and the
+     * number shown at each capture is to be the number of the page being taken again. The phone names the pages that
+     * are not whole when the wearer has ended the capture; they are taken again in place, each under its own number,
+     * and when the last one is saved the booklet goes out without another double tap.
+     */
+    @Test public void pagesThePhoneAsksForAreTakenAgainUnderTheirOwnNumbersAndThenTheBookletGoesOut() throws Exception {
+        try (Capture capture = new Capture()) {
+            take(capture, 3);
+            assertStep(capture, "DOUBLETAP");
+            org.junit.Assert.assertEquals(capture.told + " " + capture.controller.getState() + " pages=" + capture.session.pageCount(),
+                    LocalCaptureSession.Phase.ANALYSIS, capture.session.phase());
+            assertStep(capture, "RETAKE:0,2");
+            org.junit.Assert.assertEquals(LocalCaptureSession.Phase.CAPTURE, capture.session.phase());
+            org.junit.Assert.assertEquals(List.of(1, 3), capture.asked);
+            org.junit.Assert.assertTrue("a page is waited for again", capture.glasses.pageReady != null);
+            for (String step : new String[]{"PAGE", "ACK"}) assertStep(capture, step);
+            org.junit.Assert.assertEquals("the first page asked for, by its own number", 1, capture.glasses.aimingPage);
+            org.junit.Assert.assertTrue("shown as a page taken again", capture.glasses.aimingRetake);
+            for (String step : new String[]{"ACK", "WAIT:1500", "PHOTO", "ACK", "WAIT:3100"}) assertStep(capture, step);
+            org.junit.Assert.assertEquals("in place: the fourth photo is page 1", List.of(4, 2, 3), photosOf(capture));
+            org.junit.Assert.assertEquals(LocalCaptureSession.Phase.CAPTURE, capture.session.phase());
+            for (String step : new String[]{"PAGE", "ACK"}) assertStep(capture, step);
+            org.junit.Assert.assertEquals(3, capture.glasses.aimingPage);
+            for (String step : new String[]{"ACK", "WAIT:1500", "PHOTO", "ACK", "WAIT:3100"}) assertStep(capture, step);
+            org.junit.Assert.assertEquals(List.of(4, 2, 5), photosOf(capture));
+            org.junit.Assert.assertEquals("the last page asked for is in: the booklet goes out by itself",
+                    LocalCaptureSession.Phase.ANALYSIS, capture.session.phase());
+        }
+    }
+
+    /** The wearer does not have to take them: a double tap sends the booklet as it is. */
+    @Test public void aDoubleTapWhilePagesAreAskedForSendsTheBookletAsItIs() throws Exception {
+        try (Capture capture = new Capture()) {
+            take(capture, 2);
+            assertStep(capture, "DOUBLETAP");
+            assertStep(capture, "RETAKE:1");
+            assertStep(capture, "DOUBLETAP");
+            org.junit.Assert.assertEquals(LocalCaptureSession.Phase.ANALYSIS, capture.session.phase());
+            org.junit.Assert.assertEquals(List.of(1, 2), photosOf(capture));
+            // And a page taken after that end was asked for is an ordinary next page, were the capture taken up again.
+            org.junit.Assert.assertTrue(((java.util.Collection<?>) get(capture.controller, "retakeQueue")).isEmpty());
+        }
+    }
+
+    /** A page asked for that the reading does not hold is not waited for, and with none left the booklet goes out. */
+    @Test public void aPageTheReadingDoesNotHoldIsNotAskedFor() throws Exception {
+        try (Capture capture = new Capture()) {
+            take(capture, 1);
+            assertStep(capture, "DOUBLETAP");
+            assertStep(capture, "RETAKE:5");
+            org.junit.Assert.assertEquals(List.of(), capture.asked);
+            org.junit.Assert.assertEquals(LocalCaptureSession.Phase.ANALYSIS, capture.session.phase());
+        }
+    }
+
+    // ---- pages taken again after the answers were read: the last net (2026-11-19) -----------------------------------
+
+    /** The reading as it stands while its answers are read: sent, answered, nothing waited for. */
+    private static void answered(Capture capture) throws Exception {
+        assertStep(capture, "DOUBLETAP");
+        capture.session.bindDocument(17L);
+        capture.session.bindSession(23L);
+        capture.session.setPhase(LocalCaptureSession.Phase.REVIEW);
+        capture.session.answersArrived();
+        set(capture.controller, "state", RelayState.REVIEW);
+    }
+
+    /**
+     * The operator, 2026-11-19: where the answers end with pages to take again, a double tap takes them. A second
+     * double tap before any page is taken leaves the retake: nothing is sent or read again, the reading is as it
+     * was, and the display is told, which ends the writing.
+     */
+    @Test public void aRetakeBegunFromTheAnswersIsLeftByADoubleTapBeforeAnyPageAndNothingIsSent() throws Exception {
+        try (Capture capture = new Capture()) {
+            take(capture, 2);
+            answered(capture);
+            org.junit.Assert.assertTrue(capture.controller.canRetakeAnswered(List.of(1)));
+            org.junit.Assert.assertFalse("a page the reading does not hold", capture.controller.canRetakeAnswered(List.of(9)));
+            capture.controller.retakeAnswered(List.of(1));
+            barrier(capture.controller);
+            org.junit.Assert.assertEquals(List.of(2), capture.asked);
+            org.junit.Assert.assertEquals(LocalCaptureSession.Phase.CAPTURE, capture.session.phase());
+            org.junit.Assert.assertTrue("the phone is told before the first page goes", capture.session.retakeReopen());
+            org.junit.Assert.assertTrue(capture.glasses.pageReady != null);
+            assertStep(capture, "DOUBLETAP");
+            org.junit.Assert.assertTrue("the display is told: that double tap ends the writing", capture.left);
+            org.junit.Assert.assertEquals(LocalCaptureSession.Phase.REVIEW, capture.session.phase());
+            org.junit.Assert.assertEquals(RelayState.REVIEW, capture.controller.getState());
+            org.junit.Assert.assertFalse(capture.session.retakeReopen());
+            org.junit.Assert.assertFalse("nothing is waited for: the answers are on the glasses", capture.session.answersPending());
+            org.junit.Assert.assertNull("the camera stops", capture.glasses.pageReady);
+            org.junit.Assert.assertEquals(List.of(1, 2), photosOf(capture));
+        }
+    }
+
+    /** With the page taken, the booklet goes out again by itself, and the phone is still to be told first. */
+    @Test public void aPageTakenAgainFromTheAnswersGoesOutWithTheBooklet() throws Exception {
+        try (Capture capture = new Capture()) {
+            take(capture, 2);
+            answered(capture);
+            capture.controller.retakeAnswered(List.of(1));
+            barrier(capture.controller);
+            for (String step : ONE_PAGE) assertStep(capture, step);
+            org.junit.Assert.assertEquals(List.of(1, 3), photosOf(capture));
+            org.junit.Assert.assertEquals(LocalCaptureSession.Phase.ANALYSIS, capture.session.phase());
+            org.junit.Assert.assertTrue(capture.session.retakeReopen());
+            org.junit.Assert.assertFalse(capture.left);
+        }
+    }
+
+    /** A double tap while the page is being taken is the end of the capture, not a retake left: the page is kept. */
+    @Test public void aDoubleTapWhileThePageIsBeingTakenAgainSendsItWithTheBooklet() throws Exception {
+        try (Capture capture = new Capture()) {
+            take(capture, 2);
+            answered(capture);
+            capture.controller.retakeAnswered(List.of(0));
+            barrier(capture.controller);
+            for (String step : new String[]{"PAGE", "ACK", "ACK", "WAIT:1500"}) assertStep(capture, step);
+            org.junit.Assert.assertTrue("the camera has been asked", capture.glasses.requestOpen);
+            for (String step : new String[]{"DOUBLETAP", "PHOTO", "ACK", "WAIT:3100"}) assertStep(capture, step);
+            org.junit.Assert.assertFalse(capture.left);
+            org.junit.Assert.assertEquals(List.of(3, 2), photosOf(capture));
+            org.junit.Assert.assertEquals(LocalCaptureSession.Phase.ANALYSIS, capture.session.phase());
         }
     }
 
@@ -238,6 +389,11 @@ public class CaptureInvariantsTest {
         final List<String> done = new ArrayList<>();
         volatile String told = "";
         volatile boolean storeFailed;
+        /** The page numbers the wearer was last told to take again (Listener.onRetakeRequested). */
+        volatile List<Integer> asked = List.of();
+        /** The retake begun from the answers was left untouched (Listener.onRetakeLeft). */
+        volatile boolean left;
+        boolean retaken;
         int photos;
 
         Capture() throws Exception {
@@ -245,19 +401,27 @@ public class CaptureInvariantsTest {
             // Each sequence starts from nothing, so that a seed gives the same sequence alone and in the loop.
             context.getSharedPreferences("docscan_relay", Context.MODE_PRIVATE).edit().clear().commit();
             delete(new File(context.getFilesDir(), "local-scans"));
-            controller = new DocScanController(context, glasses, null, (state, lines, diagnostic) -> {
-                told = diagnostic;
-                // Every way the controller says that something could not be written.
-                if (diagnostic.contains("save failed") || diagnostic.contains("could not be saved")
-                        || diagnostic.contains("保存できません") || diagnostic.contains("開始できません")) storeFailed = true;
+            controller = new DocScanController(context, glasses, null, new DocScanController.Listener() {
+                @Override public void onUpdate(RelayState state, List<String> lines, String diagnostic) {
+                    told = diagnostic;
+                    // Every way the controller says that something could not be written.
+                    if (diagnostic.contains("save failed") || diagnostic.contains("could not be saved")
+                            || diagnostic.contains("保存できません") || diagnostic.contains("開始できません")) storeFailed = true;
+                }
+                @Override public void onRetakeRequested(List<Integer> pageNumbers) { asked = pageNumbers; }
+                @Override public void onRetakeLeft() { left = true; }
             }, new ClientIdentity("test", "test", "test"));
             ((ExecutorService) get(controller, "watchdog")).shutdownNow();
             set(controller, "watchdog", clock);
             controller.configureForLocalStart("http://phone:8000", "", 270);
             controller.startLocalSession(false);
             barrier(controller);
-            // The upload chain is out of scope: pages stay saved on the glasses and nothing is sent.
-            set(controller, "localUploadBlocked", true);
+            // The upload chain is out of scope: pages stay saved on the glasses and nothing is sent. Held as "a pass is
+            // under way", which only keeps another from starting. Until 2026-11-19 this set localUploadBlocked, "the
+            // sending has stopped": from 2026-11-18 the controller says that again after every saved page
+            // (commitLocalPhoto) and stops in ERROR, so every sequence here ended at its first saved page and the
+            // 3000 sequences that "found nothing" had looked at little behind it.
+            set(controller, "localNetworkBusy", true);
             session = (LocalCaptureSession) get(controller, "localSession");
             if (session == null) throw new IOException("the capture did not start: " + told);
         }
@@ -285,6 +449,13 @@ public class CaptureInvariantsTest {
                 if (random.nextInt(10) == 0) offer(options, "NOSTILL", 1);
             }
             if (controller.documentId() == 0) offer(options, "DOCUMENT", 1);
+            // The phone's answer to the check that follows an end: once a reading, as on the glasses.
+            if (!retaken && controller.getState() == RelayState.FINALIZING && session.pageCount() > 0
+                    && session.phase() == LocalCaptureSession.Phase.ANALYSIS) {
+                int first = random.nextInt(session.pageCount());
+                offer(options, "RETAKE:" + first + (first + 1 < session.pageCount() && random.nextBoolean()
+                        ? "," + (first + 1) : ""), 8);
+            }
             if (gesturesArePassedOn()) {
                 // A wearer who cleared the display brings it back.
                 if (paused || random.nextBoolean()) offer(options, "TAP", paused ? 5 : 1);
@@ -344,7 +515,14 @@ public class CaptureInvariantsTest {
             long now = SystemClock.elapsedRealtime();
             boolean paused = controller.isCapturePaused();
             boolean review = "capture-review".equals(glasses.purpose);
-            switch (step.startsWith("WAIT:") ? "WAIT" : step) {
+            switch (step.startsWith("WAIT:") ? "WAIT" : step.startsWith("RETAKE:") ? "RETAKE" : step) {
+                case "RETAKE": { // the phone names pages (indexes here) that are not whole: queueLocalUpload's check
+                    List<Integer> indexes = new ArrayList<>();
+                    for (String index : step.substring(7).split(",")) indexes.add(Integer.parseInt(index));
+                    retaken = true;
+                    controller.retakePages(indexes);
+                    break;
+                }
                 case "PAGE": // the camera sees a new page lying still
                     if (glasses.pageReady != null && !glasses.requestOpen) {
                         Runnable ready = glasses.pageReady;
@@ -519,6 +697,9 @@ public class CaptureInvariantsTest {
         volatile long generation, visibleReview = NO_VIEW_GENERATION;
         volatile String purpose = "";
         volatile boolean shown, nextStillFails;
+        // What the number above the small window last said (showCaptureAiming).
+        volatile int aimingPage;
+        volatile boolean aimingRetake;
 
         @Override public boolean supportsLocalCaptureReview() { return true; }
         @Override public boolean isCaptureReviewVisible(long view) { return view == visibleReview && view != NO_VIEW_GENERATION; }
@@ -531,6 +712,8 @@ public class CaptureInvariantsTest {
         }
         @Override public long showHud(List<String> lines) { return show("hud"); }
         @Override public long showCaptureAiming(int page, boolean retake, boolean stabilizing) {
+            aimingPage = page;
+            aimingRetake = retake;
             return show(stabilizing ? "capture-stabilizing" : "capture-aiming");
         }
         @Override public long showCaptureReview(byte[] jpeg, int rotation, List<String> lines) {

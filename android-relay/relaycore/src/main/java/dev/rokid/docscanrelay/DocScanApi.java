@@ -248,6 +248,22 @@ public final class DocScanApi {
         return postEmpty("/v1/documents/" + documentId + "/finalize");
     }
 
+    /**
+     * {"retake": [page numbers from 1]}: the recorded pages the phone could not make whole, asked before the booklet
+     * is finalized. The server waits for the clips in this call as it does in {@link #finalizeDocument}.
+     */
+    /**
+     * The booklet of this reading takes pages again after its answers were read: a page sent under its own number
+     * then takes that page's place, and the two finalize calls end the capture as at the first end.
+     */
+    public JSONObject retakeSession(long sessionId) throws IOException, JSONException {
+        return postEmpty("/v1/exam-sessions/" + sessionId + "/retake");
+    }
+
+    public JSONObject captureCheck(long documentId) throws IOException, JSONException {
+        return postEmpty("/v1/documents/" + documentId + "/capture-check");
+    }
+
     public JSONObject createExamSession(long documentId) throws IOException, JSONException {
         return createExamSession(documentId, false);
     }
