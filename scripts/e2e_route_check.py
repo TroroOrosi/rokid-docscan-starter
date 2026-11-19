@@ -230,6 +230,10 @@ class Check:
                 kept = self.adb("exec-out", "cat", f"/sdcard/Android/data/{PACKAGE}/files/use-log.txt", timeout=60)
                 if kept:
                     (self.report / "use-log.txt").write_bytes(kept)
+                if self.o.record_field:
+                    field = self.adb("exec-out", "cat", f"/sdcard/Android/data/{PACKAGE}/files/field-watch.bin", timeout=600)
+                    (self.report / "field-watch.bin").write_bytes(field)
+                    print(f"the whole-field watch record: {len(field) // 76820} pictures ({len(field)} bytes)")
             if watcher:
                 watcher.terminate()
                 subprocess.run([ADB, "disconnect", "127.0.0.1:5555"], capture_output=True, timeout=20)
@@ -248,6 +252,9 @@ class Check:
         solver = settings.get("providers", {}).get("solver", {}) if status == 200 else {}
         ok &= self.row("the server answering is the stand-in, armed", solver.get("name") == "recorded" and solver.get("ready") is True,
                        json.dumps(solver))
+        # On 2026-11-19 a shell mistake handed this check an empty key: everything above passed, page 1 was recorded,
+        # its upload was refused (401) and the app stopped, as it should; forty pages were then reported as not taken.
+        ok &= self.row("the server takes this key", self.api("/v1/glasses/state")[0] == 200)
         ok &= self.row("the glasses reach that server", '"status":"ok"' in self.sh(f"curl -s -m 4 {self.o.server}/health"))
         ok &= self.row("the test-only app is installed beside the real one",
                        PACKAGE in self.sh("pm list packages") and "package:dev.rokid.docscanglass.doc\n" in self.sh("pm list packages").replace("\r", ""))
@@ -281,7 +288,11 @@ class Check:
         self.sh(f"am force-stop {PACKAGE}; input keyevent KEYCODE_WAKEUP; sleep 1")
         self.since = self.stamp()
         options = (f"--es server {self.o.server} --es key {self.o.key} --es capture {self.o.capture} "
-                   f"--ei long_above {self.o.long_above}" + (f" --ei clip_frames {self.o.clip_frames}" if self.o.clip_frames else ""))
+                   f"--ei long_above {self.o.long_above}" + (f" --ei clip_frames {self.o.clip_frames}" if self.o.clip_frames else "")
+                   + (" --ez watch_field true" if self.o.watch_field else "")
+                   + (" --ez watch_record true" if self.o.watch_field and self.o.record_field else ""))
+        if self.o.record_field:
+            self.sh(f"rm -f /sdcard/Android/data/{PACKAGE}/files/field-watch.bin")  # this run's watching only
         self.sh(f"am start -W -n {ACTIVITY} {options} --ez chooser true >/dev/null 2>&1")
         time.sleep(1.5)
         # Once more without the chooser flag. This check's own watcher opens a stopped app's chooser, and a chooser
@@ -350,7 +361,10 @@ class Check:
         self.row("worn: the glasses' own camera took the reference photo", len(raw) > 100_000, detail)
 
     def paper(self) -> None:
-        print(f"----- worn use: {self.o.paper} s. Read the booklet and turn its pages; do not touch the touchpad. -----", flush=True)
+        # The wearer uses it as they would, touchpad included (M-33: two passes that asked for "pages only" missed how
+        # the thing is used). This is the test app on the stand-in server: an ended capture reaches no model.
+        print(f"----- worn use: {self.o.paper} s. Read and turn the pages and use the touchpad as you would; "
+              "nothing reaches the model. -----", flush=True)
         time.sleep(self.o.paper)
         pid = self.sh(f"pidof {PACKAGE}").strip()  # with the clock times, which log() drops
         text = "\n".join(line for line in self.sh(f'logcat -d -v time -t "{self.since}" -s DocScanGlassDoc:*', timeout=120).splitlines()
@@ -683,6 +697,11 @@ def main() -> int:
     parser.add_argument("--clip-frames", type=int, default=0,
                         help="with --capture clip: still frames a clip gathers before it ends (60 to 250), this launch only; "
                              "250 makes the ten-second clips of about 140 MB a worn head makes")
+    parser.add_argument("--watch-field", action="store_true",
+                        help="with --capture clip: the watch preview takes the whole field, this launch only (register 2-59)")
+    parser.add_argument("--record-field", action="store_true",
+                        help="with --watch-field: the glasses keep what that watch sees (field-watch.bin, a quarter-size picture "
+                             "five times a second) and the report takes it home; for a worn pass")
     parser.add_argument("--interrupt", choices=["wait"], help="force-stop the app (what a fold does) at this point and reopen the chooser")
     parser.add_argument("--paper", type=int, default=0, help="seconds of worn reading to record; the capture is not ended")
     parser.add_argument("--worn-wait", type=int, default=240, help="with --paper: seconds to wait for the wear sensor; 0 records at once (a desk dry run)")
