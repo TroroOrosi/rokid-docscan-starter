@@ -482,8 +482,31 @@ class Check:
         time.sleep(4)
         self.row("screen after the ending double tap", None, f"{self.lit('after-end')} lit pixels; "
                  + " | ".join(line[:60] for line in self.log(mark) if "preview_status" not in line and "page_change" not in line)[-3:][0:200])
+        # Before anything is finalized the phone says which recorded pages are not whole (it waits for their clips
+        # first), and the glasses take those again in place. On a lit desk it asks for none.
+        asked, deadline = None, time.monotonic() + 240
+        while time.monotonic() < deadline and asked is None:
+            if self.db("select count(*) from exam_sessions")[0][0] > self.before["sessions"]:
+                asked = ""
+            else:
+                found = [line for line in self.log(mark) if "retake_shown" in line]
+                asked = found[-1].split("retake_shown", 1)[1].strip() if found else None
+                if asked is None:
+                    time.sleep(2)
+        self.row("the phone asks for no page to be taken again", None if asked else asked == "", asked or "")
+        if asked:
+            time.sleep(3)
+            self.row("the capture comes back by itself, with the pages' numbers on the display", self.lit("retake-asked") > 0
+                     and "mWakefulness=Awake" in self.sh("dumpsys power"), asked)
+            again = self.stamp()
+            self.gesture(SWIPE_FORWARD)  # what is in view is taken: the desk does not turn its page
+            saved = self.wait_log(again, "Photo committed locally", 75)
+            self.row("a page taken then is saved under the number it was asked for", bool(saved), (saved or "not within 75 s")[-70:])
+            if saved and asked.count(",") > 0:
+                time.sleep(1)
+                self.gesture(DOUBLE_TAP)  # the others are left: the booklet goes out as it is
         session = self.wait_db("select id, status, document_id from exam_sessions order by id desc limit 1",
-                               lambda rows: rows and self.db("select count(*) from exam_sessions")[0][0] > self.before["sessions"], 90)
+                               lambda rows: rows and self.db("select count(*) from exam_sessions")[0][0] > self.before["sessions"], 240)
         if not self.row("ending the capture creates the analysis session on the server",
                         bool(session) and self.db("select count(*) from exam_sessions")[0][0] > self.before["sessions"],
                         f"session {session[0] if session else None}; app: "
@@ -516,14 +539,16 @@ class Check:
             return False
         self.ready_at, self.ready_stamp = ready_at, mark
         if self.o.capture == "clip":
-            items = self.api(f"/v1/exam-sessions/{self.session}/answer-bundle")[1].get("items", [])
-            # The notices of the reads (照合中 while the second read runs, 照合なし after one read) stand in the same
-            # group and are no page left ungathered: counted as one on 2026-11-18, with the two-read stand-in.
-            named = [str(item.get("question_label")) for item in items if item.get("group_id") == "pages"
-                     and item.get("question_id") not in ("read-comparing", "read-once")]
-            self.row("the answers name no page as left ungathered", not named, ", ".join(named))
+            connection = sqlite3.connect(f"file:{Path(self.o.data) / 'docscan.db'}?mode=ro", uri=True)
+            try:
+                left = [str(row[0] + 1) for row in connection.execute(
+                    "SELECT page_index FROM page_clips WHERE document_id = (SELECT document_id FROM exam_sessions "
+                    "WHERE id = ?) AND status != 'done' ORDER BY page_index", (self.session,))]
+            finally:
+                connection.close()
+            self.row("no page went out ungathered", not left, ", ".join(left))
         first = self.api(f"/v1/exam-sessions/{self.session}/answer-bundle")[1]
-        self.comparing = any(item.get("question_id") == "read-comparing" for item in first.get("items", []))
+        self.comparing = bool(first.get("comparing"))
         self.first_revision = first.get("revision")
         return True
 
@@ -566,11 +591,11 @@ class Check:
             deadline, later = time.monotonic() + 60, {}
             while time.monotonic() < deadline:
                 later = self.api(f"/v1/exam-sessions/{self.session}/answer-bundle")[1]
-                if not any(item.get("question_id") == "read-comparing" for item in later.get("items", [])):
+                if later.get("items") and not later.get("comparing"):
                     break
                 time.sleep(2)
             time.sleep(8)  # the watcher's notice and the glasses' load
-            gone = not any(item.get("question_id") == "read-comparing" for item in later.get("items", []))
+            gone = bool(later.get("items")) and not later.get("comparing")
             self.row("the compared answers follow the first read's under a newer revision", gone
                      and later.get("revision") != self.first_revision,
                      f"revision {self.first_revision} then {later.get('revision')}")
@@ -581,11 +606,58 @@ class Check:
                      and "mWakefulness=Awake" in self.sh("dumpsys power") and self.lit("answers-updated") > 0,
                      f"acknowledged {acknowledged}")
         state = self.db("select count(*) from exam_sessions")[0][0]
-        mark = self.stamp()
-        self.gesture(DOUBLE_TAP)
-        time.sleep(6)
-        self.row("a double tap in the reader ends the writing and the display goes off",
-                 self.lit("writing-done") == 0, " | ".join(line[:70] for line in self.log(mark) if "preview_status" not in line)[-200:])
+        listed = self.api(f"/v1/exam-sessions/{self.session}/answer-bundle")[1]
+        if listed.get("retake"):
+            # The answers end with captures to take again: a double tap takes them, and the booklet is read again.
+            mark = self.stamp()
+            self.gesture(DOUBLE_TAP)
+            back = self.wait_log(mark, "retake_shown", 10)
+            time.sleep(2)
+            self.row("with captures to take again listed, a double tap on the answers brings the capture back",
+                     bool(back) and self.lit("retake-from-answers") > 0, f"listed {listed['retake']}; " + (back or "no retake")[-60:])
+            self.gesture(SWIPE_FORWARD)
+            saved = self.wait_log(mark, "Photo committed locally", 75)
+            self.row("the page is taken again under its own number", bool(saved), (saved or "not within 75 s")[-70:])
+            if saved and len(listed["retake"]) > 1:
+                time.sleep(1)
+                self.gesture(DOUBLE_TAP)
+            deadline, later = time.monotonic() + 240, {}
+            while time.monotonic() < deadline:
+                status, later = self.api(f"/v1/exam-sessions/{self.session}/answer-bundle")
+                if status == 200 and later.get("revision", 0) > listed.get("revision", 0) and not later.get("comparing"):
+                    break
+                time.sleep(2)
+            self.row("the booklet is read again with it: other pictures, a newer revision, the same questions",
+                     later.get("revision", 0) > listed.get("revision", 0) and later.get("input_digest") != listed.get("input_digest")
+                     and [item["question_id"] for item in later.get("items", [])][:len(listed["items"])]
+                     == [item["question_id"] for item in listed["items"]],
+                     f"revision {listed.get('revision')} then {later.get('revision')}")
+            shown, deadline = None, time.monotonic() + 45
+            while time.monotonic() < deadline and shown is None:
+                devices = (self.api("/v1/glasses/state")[1] or {}).get("devices") or []
+                acknowledged = [device.get("ack_answer_revision") for device in devices if device.get("session_id") == self.session]
+                if acknowledged and acknowledged[0] == later.get("revision") and self.lit("answers-again") > 0:
+                    shown = True
+                else:
+                    time.sleep(2)
+            self.row("the glasses wake and show the new answers by themselves", bool(shown))
+            # Still listed (the stand-in answers as before): the retake is begun and left, which ends the writing.
+            mark = self.stamp()
+            self.gesture(DOUBLE_TAP)
+            self.wait_log(mark, "retake_shown", 10)
+            time.sleep(2.5)
+            self.gesture(DOUBLE_TAP)
+            left = self.wait_log(mark, "retake_left_ends_writing", 10)
+            time.sleep(6)
+            self.row("a second double tap before any page is taken ends the writing and the display goes off",
+                     bool(left) and self.lit("writing-done") == 0,
+                     " | ".join(line[:70] for line in self.log(mark) if "preview_status" not in line)[-200:])
+        else:
+            mark = self.stamp()
+            self.gesture(DOUBLE_TAP)
+            time.sleep(6)
+            self.row("a double tap in the reader ends the writing and the display goes off",
+                     self.lit("writing-done") == 0, " | ".join(line[:70] for line in self.log(mark) if "preview_status" not in line)[-200:])
         # One command: sent as two over the phone relay they reached the glasses 4.5 s apart on 2026-11-16, past the
         # three seconds the app allows, and a correct app stayed in front.
         self.sh(self.keys(DOUBLE_TAP) + "; sleep 0.6; " + self.keys(DOUBLE_TAP))
