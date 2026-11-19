@@ -381,18 +381,30 @@ def _result(answer: str) -> str:
 _LABEL_WORDS = re.compile(
     r"([①-⑳㉑-㉟㊱-㊿⓪ⓐ-ⓩ]|(?<![^\s:：])[ァ-ヶ])[ \t　]*"
     r"[（(](?:[^（）()\n]|[（(][^（）()\n]*[）)])*[）)][ \t　]*$", re.MULTILINE)
-# A circled number of two digits: ⑩ to ⑳, ㉑ to ㊿.
-_TWO_DIGIT = re.compile(r"[⑩-⑳㉑-㉟㊱-㊿]")
-# Said of a ready answer that names a choice by such a label and carries no other note. Phone, 2026-11-18: a word
-# bank's labels ran ⑩, ⑫, ⑬ in soft print; in the morning both reads counted along the row and agreed on ⑪, and read
-# again with the options' words they agreed on every option and differed on every label of two digits.
-_CHECK_LABEL = "2桁の丸数字は紙面の番号で確認"
+# What differs between two reads in form alone (the operator, 2026-11-19: an answer was marked as differing where
+# only a bracket did; of that day's 175 answers 41 carried a note). After NFKC:
+# the printed name a box's result is written under, in whatever brackets, as "[name]";
+_NAME = re.compile(r"^[\[(〔【]([^\[\]()〔〕【】:]{1,6})[\])〕】](?=:)")
+# a separator before such a name is the end of the box before it ("(1):A、(2):B" is two boxes);
+_NAMES_APART = re.compile(r"[、,;]\s*(?=[\[(〔【][^\[\]()〔〕【】:]{1,6}[\])〕】]:)")
+# a value that stands in round brackets by itself is the value ("（C）", "図1：（C）"). A bracket behind a value
+# ("2(x+1)") is part of it, and a square bracket is another thing than a round one (an interval);
+_WRAPPED = re.compile(r"(?:(?<=:)|^)\(([^()]{1,12})\)$")
+# the double hyphen inside a name in katakana is written or not.
+_NAME_HYPHEN = re.compile(r"(?<=[ァ-ヶー])=(?=[ァ-ヶ])")
+# The letters mark-sheet boxes are named by, in their order: a run of them at the heads of a question's lines
+# ("ア：④ / イ：② / ウ：④") is the boxes' names, where two symbols at the head of two ratios are not.
+_BOX_LETTERS = ("アイウエオカキクケコサシスセソタチツテトナニヌネノハヒフヘホマミムメモヤユヨラリルレロワ", "abcdefghijklmnopqrstuvwxyz")
+_ROMAN = ("i", "ii", "iii", "iv", "v", "vi", "vii", "viii", "ix", "x")
 
 
 def _short(text: str) -> str:
-    """One line of a result as it is compared: no spaces, no separators, without regard to case, and a choice by its
-    label alone."""
-    return re.sub(r"[、,・;]+", "", _plain(_LABEL_WORDS.sub(r"\1", text))).replace("\N{MINUS SIGN}", "-").casefold()
+    """One line of a result as it is compared: no spaces, no separators, without regard to case, a choice by its
+    label alone, and without what is only another way of writing the same thing down (``_NAME`` and what follows)."""
+    words = unicodedata.normalize("NFKC", _LABEL_WORDS.sub(r"\1", text))
+    parts = [_WRAPPED.sub(r"\1", _NAME.sub(r"[\1]", part)) for part in _NAMES_APART.sub(" ", words).split()]
+    joined = _NAME_HYPHEN.sub("", "".join(parts))
+    return re.sub(r"[、,・;]+", "", joined).replace("\N{MINUS SIGN}", "-").casefold()
 
 
 # The longest line that is still one box's result: a label and the words of its option.
@@ -517,12 +529,15 @@ def _slot_marks(replies: list, slots: list) -> dict:
         if not _answered(result):
             marks.update(dict.fromkeys(keys, _UNANSWERED))
             continue
+        names = [key[2] if key[0] == "box" else key[1] if key[0] == "number" else "" for key in keys]
         whole = _mark(result.answer)
+        if whole is not None and len(keys) == 1:
+            whole = _unnamed(whole, names[0])  # "[7]：①" for answer number 7 is ①
         text = unicodedata.normalize("NFKC", _result(result.answer))
         # From the answer as written: normalised first, a circled label is digits and is no longer told from a value.
         lines = [_short(line) for line in _result(result.answer).splitlines() if line.strip()]
         if len(keys) > 1 and len(lines) == len(keys) and max(map(len, lines)) <= _BOX_LINE:
-            marks.update(zip(keys, lines))
+            marks.update(zip(keys, _values(lines, names)))
             continue
         # The model separates the marks of one question by spaces as often as by commas ("④ ④ ① ② ②", phone).
         parts = [part for part in re.split(r"[\s、,・;]+", text) if part]
@@ -535,11 +550,25 @@ def _slot_marks(replies: list, slots: list) -> dict:
 
 
 def _unnamed(mark: str, name: str) -> str:
-    """A box's mark without the printed name it was written under ("[4]:11" for box 4 is 11)."""
-    for head in (f"[{name}]:", f"{name}:"):
-        if mark.startswith(head) and len(mark) > len(head):
-            return mark[len(head):]
-    return mark
+    """A box's mark without the printed name it was written under: its own answer number or letter ("[4]:11" and
+    "4:11" for box 4 are 11), or whatever the paper prints in brackets beside it ("[a]:11"). A number that is not
+    the box's own stays: "1:2" is a ratio."""
+    head, colon, value = mark.partition(":")
+    if not colon or not value:
+        return mark
+    return value if (name and head in (name, f"[{name}]")) or re.fullmatch(r"\[[^\[\]]{1,6}\]", head) else mark
+
+
+def _values(lines: list[str], names: list[str]) -> list[str]:
+    """The marks of a question's boxes, a line each, without the names they were written under (``_unnamed``).
+    Lines headed by a run of box letters (ア, イ, ウ; a, b, c; i, ii, iii) are boxes named by their letters, where
+    the other read may go by their answer numbers."""
+    heads = [line.partition(":")[0] if ":" in line else None for line in lines]
+    run = len(lines) > 1 and all(heads) and (
+        any("".join(heads) in letters for letters in _BOX_LETTERS if all(len(head) == 1 for head in heads))
+        or any(tuple(heads) == _ROMAN[at:at + len(heads)] for at in range(len(_ROMAN))))
+    return [line.partition(":")[2] if run and line.partition(":")[2] else _unnamed(line, name)
+            for line, name in zip(lines, names)]
 
 
 def _compared(first: list, second: list) -> list:
@@ -571,14 +600,19 @@ def _compared(first: list, second: list) -> list:
             different = [(key, theirs[key]) for key in keys
                          if key in theirs and theirs[key] is not _UNANSWERED and theirs[key] != mine[key]]
             if different and len(keys) == 1 and match is not None and _answered(match[1]):
-                note = _DIFFERENT.format(other=" ".join(_result(match[1].answer).split())[:24])
+                other = " ".join(_result(match[1].answer).split())
+                note = _DIFFERENT.format(other=other[:24])
             elif different:
                 # Several numbers, or the other read grouped them differently: name the ones it differs on. Until
                 # 2026-11-18 a question of several boxes showed the other read's whole answer cut at 24 characters,
                 # its first boxes and not the one that differs.
-                note = _DIFFERENT.format(other="、".join(
+                other = "、".join(
                     f"{name}は{'記述' if mark is None else _unnamed(mark, name)}"
-                    for name, mark in ((key[2] if key[0] == "box" else key[1], mark) for key, mark in different))[:40])
+                    for name, mark in ((key[2] if key[0] == "box" else key[1], mark) for key, mark in different))
+                note = _DIFFERENT.format(other=other[:40])
+            if different:
+                # By itself too, for the glasses to show beside this answer without a sentence around it.
+                result.extras["other_answer"] = other[:120]
             elif any(theirs.get(key) is _UNANSWERED for key in keys):
                 note = _ONE_ANSWERED
             elif any(key not in theirs for key in keys):
@@ -1232,10 +1266,10 @@ class CodexCliSolver(Solver):
             replies = first
         else:
             replies = _compared(first, _booklet_replies(reads[1], subject=question.subject, extras=extras))
-        for _, result in replies:
-            if (_answered(result) and not result.extras.get("review_note")
-                    and _TWO_DIGIT.search(_result(result.answer))):
-                result.extras["review_note"] = _CHECK_LABEL
+        # Until 2026-11-19 an answer that named a choice by a circled number of two digits always asked to be checked
+        # on the paper, both reads agreeing or not (a word bank's soft labels were once read wrongly by both alike,
+        # M-44 (17)). The option's words stand beside the label for that check, and the operator asked for answers
+        # without explanations.
         return replies
 
     @staticmethod

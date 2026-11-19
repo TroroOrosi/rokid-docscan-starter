@@ -727,10 +727,11 @@ with TestClient(main.app) as client:
             body = bundle.json()
             if not out["seen"] or out["seen"][-1]["revision"] != body["revision"]:
                 out["seen"].append({"revision": body["revision"], "at": round(time.time() - began, 1),
+                                    "comparing": body.get("comparing", False),
                                     "ids": [item["question_id"] for item in body["items"]],
                                     "labels": [item["question_label"] for item in body["items"]]})
             # The first read's answers alone are not the last word: the route is still comparing them.
-            if all(item["status"] != "pending" and item["question_id"] != "read-comparing" for item in body["items"]):
+            if all(item["status"] != "pending" for item in body["items"]) and not body.get("comparing"):
                 break
         time.sleep(0.3)
     out["bundle"] = bundle.status_code
@@ -862,8 +863,8 @@ def test_through_the_server_the_first_reads_answers_are_in_the_bundle_before_the
     assert lines, done.stderr[-2500:]
     result = json.loads(lines[-1][7:])
     early, late = result["seen"]
-    assert early["labels"][-1] == "照合中" and late["at"] - early["at"] >= 2.0
-    assert late["ids"] == early["ids"][:-1] and late["revision"] > early["revision"]
+    assert early["comparing"] is True and late["comparing"] is False and late["at"] - early["at"] >= 2.0
+    assert late["ids"] == early["ids"] and late["revision"] > early["revision"]
     assert result["items"] == [["needs_review", "④"], ["needs_input", ""]] and "②" in result["issues"][0]
     assert sum('"codex_read_done"' in line for line in done.stdout.splitlines()) == 2
 
@@ -1605,16 +1606,15 @@ def test_a_box_the_reads_differ_on_is_named_with_what_the_other_read_says_there(
     assert note.endswith("他方：4は11"), "the box and the other read's label there: no words, no other box"
 
 
-@pytest.mark.parametrize("answer, asked", [("⑫（光合成）", True), ("[1]：③（葉緑体）\n[2]：⑩（気孔）", True),
-                                           ("⑨（光合成）", False), ("12", False), ("㉓", True)])
-def test_a_circled_label_of_two_digits_is_always_to_be_checked_on_the_paper(codex, tmp_path, monkeypatch, answer, asked):
-    """The operator's use of 2026-11-18: both reads read a word bank's soft two-digit labels wrongly in the same way
-    (the 11th option as ⑪ where the paper prints ⑫), so nothing was marked. Read again, the two reads agreed on every
-    option's words and differed on every label of two digits."""
+@pytest.mark.parametrize("answer", ["⑫（光合成）", "[1]：③（葉緑体）\n[2]：⑩（気孔）", "⑨（光合成）", "12", "㉓"])
+def test_a_circled_label_of_two_digits_both_reads_agree_on_carries_no_note(codex, tmp_path, monkeypatch, answer):
+    """From 2026-11-18 such an answer always asked to be checked on the paper: both reads had once read a word
+    bank's soft two-digit labels wrongly in the same way (the 11th option as ⑪ where the paper prints ⑫). The
+    operator, 2026-11-19: no explanations beside the answers. The option's words stand after the label, which is
+    what the wearer checks the label by."""
     _twice(monkeypatch, _read((1, answer)), _read((1, answer)))
     [(_, shown, status, note)] = _shown(codex_cli.CodexCliSolver().answer_all(question=_booklet(tmp_path)))
-    assert shown == answer and status == "ready"
-    assert (note == codex_cli._CHECK_LABEL) is asked and bool(note) is asked
+    assert shown == answer and status == "ready" and note == ""
 
 
 @pytest.mark.parametrize("first", ["fails", "is not an answer list"])
