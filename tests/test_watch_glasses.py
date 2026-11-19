@@ -1185,7 +1185,10 @@ def test_watch_poll_cadence_includes_work_instead_of_an_extra_full_wait(
     assert reads == pytest.approx(expected_reads)
     assert pauses == pytest.approx(expected_pauses)
     assert sum("ro.serialno" in command for command in commands) == 1
-    assert sum("pidof" in command for command in commands) == 3
+    # The first pass reads the glasses and the second looks once more, since the
+    # first changed what the watcher remembers; the third has nothing to read
+    # them for (it was one read a pass until 2026-11-19).
+    assert sum("pidof" in command for command in commands) == 2
     assert not any("input" in command or "am" in command for command in commands)
 
 
@@ -1194,3 +1197,212 @@ def test_watch_poll_cadence_keeps_the_remaining_wait_after_a_short_http_failure(
     assert reads == pytest.approx([0.0, 0.5, 1.0])
     assert pauses == pytest.approx([0.375, 0.375, 0.375])
     assert commands == []
+
+
+# How often the glasses are read. A read of the fold and the process is an adb
+# round trip that wakes the glasses' Wi-Fi and processor; until 2026-11-19 it
+# was made on every pass, around the clock.
+
+READING = {**STATE, "phase": "reading", "answer_ready": True, "available_stage": "complete",
+           "answer_revision": 2, "ack_answer_revision": 2}
+SOFT_SLEEP = ("shell", "input", "-d", "0", "keyevent", "KEYCODE_SOFT_SLEEP")
+CHOOSER = ("shell", "am", "start", "-W", "-n", watch_glasses.COMPONENT, "--ez", "chooser", "true")
+
+
+def _paced(monkeypatch, state_at, seconds, spread_at=lambda now: "1", running=True, every_pass=False,
+           serial="glasses:5555"):
+    """A watch on a fake clock, one pass each half second until `seconds` have gone by.
+
+    The server answers `state_at(now)`, or fails with it when it is an error,
+    and the fold property reads `spread_at(now)`. `every_pass` takes the idle
+    periods away: the watcher as it was when every pass read the glasses. With
+    the serial "auto" the glasses are at the address the state names. Returns
+    when the fold was read, and every adb process started as (now, the
+    arguments after the serial).
+    """
+    elapsed = [0.0]
+    reads, trips = [], []
+    address = [serial]
+
+    def adb(to, *args):
+        assert to == address[0]
+        if args == SERIAL_READ:
+            return "expected"
+        if args == ("shell", "getprop", "vendor.rkd.glasses.is_spread"):
+            reads.append(elapsed[0])
+            return spread_at(elapsed[0])
+        return "volume is 0" if "--get" in args else ""
+
+    def fetch(*args):
+        if elapsed[0] > seconds:
+            raise StopIteration
+        state = state_at(elapsed[0])
+        if isinstance(state, Exception):
+            raise state
+        if serial == "auto":
+            address[0] = f"{state['source_ip']}:5555"
+        return state
+
+    with monkeypatch.context() as patch:
+        if every_pass:
+            patch.setattr(watch_glasses, "DEVICE_READ_FOLDED_SECONDS", 0.0)
+            patch.setattr(watch_glasses, "DEVICE_READ_STEADY_SECONDS", 0.0)
+        if serial == "auto":  # Connecting is not what these tests are about.
+            patch.setattr(watch_glasses, "target", lambda requested, expected, state: address[0])
+        _fake_device(patch, adb, running=running)
+        device = watch_glasses.subprocess.run
+
+        def run(argv, **kwargs):
+            trips.append((elapsed[0], tuple(argv[3:])))
+            return device(argv, **kwargs)
+
+        patch.setattr(watch_glasses.subprocess, "run", run)
+        patch.setattr(watch_glasses, "fetch_state", fetch)
+        patch.setattr(watch_glasses.time, "monotonic", lambda: elapsed[0])
+        patch.setattr(watch_glasses.time, "sleep", lambda _: elapsed.__setitem__(0, elapsed[0] + 0.5))
+        with pytest.raises(StopIteration):
+            watch_glasses.watch(serial, "expected", 0.5)
+    return reads, trips
+
+
+def _sent(trips):
+    """What went to the glasses and when, without the reads of fold, process and volume."""
+    return [(now, trip) for now, trip in trips if trip not in (FOLD_AND_PROCESS, VOLUME_READ)]
+
+
+def _apart(reads, seconds):
+    """Every read after the first two is at least `seconds` after the one before it.
+
+    The first read finds out what the glasses are doing, and the pass after a
+    pass that changed what the watcher remembers looks once more.
+    """
+    return all(later - earlier >= seconds for earlier, later in zip(reads[1:], reads[2:]))
+
+
+def test_a_steady_reader_is_read_once_in_five_seconds_and_sent_nothing_between(monkeypatch):
+    reads, trips = _paced(monkeypatch, lambda now: READING, 60)
+    assert _apart(reads, 5.0) and len(reads) <= 60 / 5.0 + 2, reads
+    assert {now for now, _ in trips} == set(reads), "a pass that does not read the fold starts no adb process"
+    # Identity and mute once; with a read of the fold at most the volume check, on its own second.
+    assert [now for now, trip in trips if trip == VOLUME_READ] == [now for now in reads if now >= 1.0]
+    assert _sent(trips) == [(0.0, SERIAL_READ), (0.0, MUTE)]
+    assert len(trips) <= 2 + 2 * len(reads)
+
+
+@pytest.mark.parametrize("state", [STATE, {**READY, "answer_revision": 1, "ack_answer_revision": None},
+                                   {**STATE, "phase": "chooser", "session_id": None, "display_request": "sleep"}],
+                         ids=["nothing_wanted", "answer_unreceived", "sleep_requested"])
+def test_folded_glasses_are_read_once_in_two_seconds_whatever_the_state_still_asks(monkeypatch, state):
+    reads, trips = _paced(monkeypatch, lambda now: state, 30, spread_at=lambda now: "0")
+    assert _apart(reads, 2.0) and len(reads) <= 30 / 2.0 + 2, reads
+    assert {now for now, _ in trips} == set(reads)
+    assert _sent(trips) == [(0.0, SERIAL_READ), (0.0, MUTE)], "folded glasses are sent nothing, as before"
+
+
+def test_a_stopped_app_is_started_once_and_then_looked_for_once_in_two_seconds(monkeypatch):
+    reads, trips = _paced(monkeypatch, lambda now: STATE, 30, running=False)
+    assert _apart(reads, 2.0) and len(reads) <= 30 / 2.0 + 2, reads
+    assert _sent(trips) == [(0.0, SERIAL_READ), (0.0, MUTE),
+                            (0.0, (*CHOOSER, "--ez", "wear_bootstrap", "true"))]
+    assert _sent(trips) == _sent(_paced(monkeypatch, lambda now: STATE, 30, running=False, every_pass=True)[1])
+
+
+def test_what_a_pass_left_for_the_next_one_is_done_in_the_next_one_as_before(monkeypatch):
+    """A stopped app is started first; the sleep its state asks for goes in the pass after."""
+    asleep = {**STATE, "phase": "chooser", "session_id": None, "display_request": "sleep"}
+    reads, trips = _paced(monkeypatch, lambda now: asleep, 20, running=False)
+    assert _sent(trips)[2:] == [(0.0, (*CHOOSER, "--ez", "wear_bootstrap", "true")), (0.5, SOFT_SLEEP)]
+    assert _sent(trips) == _sent(_paced(monkeypatch, lambda now: asleep, 20, running=False, every_pass=True)[1])
+    assert len(reads) <= 20 / 2.0 + 3, reads
+
+
+def test_glasses_that_come_back_under_another_address_are_checked_and_read_in_that_pass(monkeypatch):
+    def state_at(now):
+        return {**STATE, "source_ip": "10.0.0.10" if now < 7.5 else "10.0.0.11"}
+
+    reads, trips = _paced(monkeypatch, state_at, 9, running=False, serial="auto")
+    assert [trip for now, trip in trips if now == 7.5][:3] == [SERIAL_READ, MUTE, FOLD_AND_PROCESS]
+    assert len([now for now in reads if now < 7.5]) <= 7.5 / 2.0 + 2, reads
+
+
+@pytest.mark.parametrize("field,value", [("generation", 4), ("sequence", 2), ("phase", "writing_done"),
+                                         ("display_request", "wake"), ("session_id", 8),
+                                         ("available_stage", "reading"), ("answer_revision", 3),
+                                         ("ack_answer_revision", None), ("answer_ready", False),
+                                         ("entry_request", "chooser")])
+def test_a_change_in_the_servers_state_is_read_and_acted_on_in_the_pass_that_sees_it(monkeypatch, field, value):
+    def state_at(now):
+        return READING if now < 7.5 else {**READING, field: value}
+
+    reads, trips = _paced(monkeypatch, state_at, 20)
+    assert 7.5 in reads and len([now for now in reads if now < 7.5]) <= 3, reads
+    assert _sent(trips) == _sent(_paced(monkeypatch, state_at, 20, every_pass=True)[1])
+
+
+def test_a_sleep_request_is_sent_in_the_pass_that_sees_it_ahead_of_the_fold_read(monkeypatch):
+    awake = {**STATE, "phase": "chooser", "session_id": None, "display_request": "wake"}
+    asleep = {**awake, "sequence": 2, "display_request": "sleep"}
+
+    def state_at(now):
+        return awake if now < 7.5 else asleep
+
+    reads, trips = _paced(monkeypatch, state_at, 30)
+    assert [trip for now, trip in trips if now == 7.5][:2] == [SOFT_SLEEP, FOLD_AND_PROCESS]
+    assert [now for now, trip in trips if trip == SOFT_SLEEP] == [7.5]
+    assert _sent(trips) == _sent(_paced(monkeypatch, state_at, 30, every_pass=True)[1])
+    # A request that has been carried out does not keep the glasses awake.
+    assert len([now for now in reads if now > 8.0]) <= (30 - 8.0) / 5.0 + 1, reads
+
+
+def test_an_unreceived_answer_is_woken_at_once_and_every_five_seconds_until_it_is_received(monkeypatch):
+    waiting = {**STATE, "phase": "analyzing", "sequence": 2}
+    ready = {**waiting, "answer_ready": True, "answer_revision": 1, "ack_answer_revision": None}
+    received = {**ready, "phase": "reading", "sequence": 3, "ack_answer_revision": 1}
+
+    def state_at(now):
+        return waiting if now < 7.5 else ready if now < 24.0 else received
+
+    reads, trips = _paced(monkeypatch, state_at, 40)
+    wake = ("shell", MUTE_THEN + WAKE + " --el answer_revision 1")
+    assert [now for now, trip in trips if trip == wake] == [7.5, 12.5, 17.5, 22.5]
+    assert _sent(trips) == _sent(_paced(monkeypatch, state_at, 40, every_pass=True)[1])
+    # Until it is received every pass reads the fold, as before; not before it came, and not after.
+    assert [now for now in reads if 7.5 <= now < 24.0] == [7.5 + 0.5 * n for n in range(33)]
+    assert len([now for now in reads if now < 7.5]) <= 3, reads
+    assert len([now for now in reads if now > 24.0]) <= (40 - 24.0) / 5.0 + 1, reads
+
+
+@pytest.mark.parametrize("unfolded_at", [4.6, 6.0, 6.5])
+def test_unfolding_is_noticed_within_two_seconds_and_brings_the_chooser_up_as_before(monkeypatch, unfolded_at):
+    def spread_at(now):
+        return "0" if now < unfolded_at else "1"
+
+    reads, trips = _paced(monkeypatch, lambda now: STATE, 20, spread_at=spread_at)
+    noticed = [now for now, trip in trips if trip == CHOOSER]
+    assert len(noticed) == 1 and 0 <= noticed[0] - unfolded_at <= 2.0, noticed
+    assert [trip for now, trip in trips if now == noticed[0]][:4] == [
+        FOLD_AND_PROCESS, MUTE, ("shell", "input", "-d", "0", "keyevent", "KEYCODE_WAKEUP"), CHOOSER]
+    as_before = _paced(monkeypatch, lambda now: STATE, 20, spread_at=spread_at, every_pass=True)[1]
+    assert [trip for _, trip in _sent(trips)] == [trip for _, trip in _sent(as_before)]
+    assert len([now for now in reads if now < unfolded_at]) <= unfolded_at / 2.0 + 2, reads
+
+
+def test_the_pass_after_a_failed_read_connects_and_reads_again_without_waiting(monkeypatch):
+    def spread_at(now):
+        if now == 5.5:
+            raise subprocess.CalledProcessError(1, "device")
+        return "1"
+
+    reads, trips = _paced(monkeypatch, lambda now: READING, 12, spread_at=spread_at)
+    assert 5.5 in reads and len([now for now in reads if now < 5.5]) <= 2, reads
+    assert [trip for now, trip in trips if now == 6.0][:3] == [SERIAL_READ, MUTE, FOLD_AND_PROCESS]
+
+
+def test_the_pass_after_the_server_comes_back_reads_the_glasses_and_says_so(monkeypatch, capsys):
+    def state_at(now):
+        return watch_glasses.StateUnavailable("server_stopped") if 7.0 <= now < 8.0 else READING
+
+    reads, _ = _paced(monkeypatch, state_at, 8.0)
+    assert reads[-1] == 8.0 and len([now for now in reads if now < 7.0]) <= 3, reads
+    output = capsys.readouterr().out
+    assert output.index("Watcher: server_stopped; waiting") < output.index("Glasses/server connection restored")

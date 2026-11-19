@@ -26,6 +26,18 @@ PACKAGE = "dev.rokid.docscanglass.doc"
 COMPONENT = f"{PACKAGE}/dev.rokid.docscanglass.doc.DocScanGlassActivity"
 SERVER = "http://127.0.0.1:8000"
 ANSWER_RETRY_SECONDS = 5.0
+# How long a read of the glasses' fold and process stands while nothing asks
+# for another one (device_read_due in watch). A read is an adb round trip that
+# wakes the glasses' Wi-Fi and processor, 0.34-1.42 s each on the phone on
+# 2026-11-19, and every pass made one, around the clock. Folded, or without the
+# app, the next thing to see is the wearer opening them, and the chooser has to
+# come up promptly. Spread and running, nothing is expected of the glasses
+# until the server's state changes. Neither period is measured on the glasses.
+DEVICE_READ_FOLDED_SECONDS = 2.0
+DEVICE_READ_STEADY_SECONDS = 5.0
+# What the watcher acts on in the server's state.
+STATE_ACTED_ON = ("device_id", "generation", "sequence", "session_id", "phase", "display_request", "entry_request",
+                  "answer_ready", "available_stage", "answer_revision", "ack_answer_revision")
 MDNS_MAX_BYTES = 8192
 MDNS_MAX_CANDIDATES = 4
 MDNS_TIMEOUT_SECONDS = 4.0
@@ -480,6 +492,44 @@ def watch(requested: str, expected_serial: str, interval: float, server: str = S
     last_running = False
     selected = device_id or os.environ.get("ROKID_GLASSES_DEVICE_ID")
     observed_order = (-1, -1)
+    device_read_at = None  # None: the next pass reads the glasses, whatever else holds.
+    device_read_for = None
+
+    def read_basis(state: dict) -> tuple:
+        """What a pass decides from, besides the glasses' answers and the clock."""
+        return (*(state.get(field) for field in STATE_ACTED_ON),
+                folded, bootstrapped, last_running, sleep_key, woken, worn_entry)
+
+    def device_read_due(state: dict, stale: bool) -> bool:
+        """Whether this pass reads the glasses; a pass that does not sends them nothing.
+
+        It reads at once after a connection, an identity check or a failed
+        pass; when the server's state is not the one the last read was made
+        for; when the pass of that read changed what the watcher remembers, so
+        that it may have more to do (it sent a sleep, a wake or a launch, or saw
+        the fold or the app change); and, with the glasses open, on every pass
+        while an answer is unreceived, since that wake is sent again by the
+        clock. From a pass that had nothing to do, the same state and the same
+        answers of the glasses give nothing to do again: the read is then made
+        only for what the glasses may have done by themselves, after
+        DEVICE_READ_FOLDED_SECONDS or DEVICE_READ_STEADY_SECONDS. Folded glasses
+        are sent nothing whatever the state asks, so they keep the shorter
+        period with an answer unreceived too.
+
+        What the periods cost: glasses that were opened, or an app that stopped,
+        are found that much later, and so is a playback volume that came back,
+        which is looked at only in a pass that reads. A fold that is over before
+        the next read is not seen as one: the app it stopped is started as a
+        stopped app is, without the unfold's mute and wake key. The sleep sent
+        ahead of the read goes by a read up to a period old; its request is
+        newer than that read, and only the running app makes one.
+        """
+        if device_read_at is None or read_basis(state) != device_read_for:
+            return True
+        if not folded and not stale and answer_unreceived(state):
+            return True
+        idle = DEVICE_READ_STEADY_SECONDS if last_running and not folded else DEVICE_READ_FOLDED_SECONDS
+        return time.monotonic() - device_read_at >= idle
 
     def observe_order(state: dict) -> None:
         nonlocal observed_order
@@ -538,6 +588,7 @@ def watch(requested: str, expected_serial: str, interval: float, server: str = S
                 verified = False
             if not verified:
                 last_running = False
+                device_read_at = None  # A connection made or checked again has not been read.
                 serial = target(requested, expected_serial, state)
                 if adb(serial, "shell", "getprop", "ro.serialno") != expected_serial:
                     raise SystemExit("Glasses identity mismatch; watcher stopped")
@@ -546,79 +597,83 @@ def watch(requested: str, expected_serial: str, interval: float, server: str = S
             order = (state["generation"], state["sequence"])
             stale = order < newest
             newest = max(newest, order)
-            sleep_checked = False
-            if (last_running and not folded and not stale and state.get("display_request") == "sleep"
-                and state.get("entry_request") != "chooser" and not answer_unreceived(state)):
-                # An already-running app's explicit idle request has priority
-                # over slow fold/pidof/audio diagnostics. Cold bootstrap and a
-                # known fold still take their ordinary entry path below.
-                connection_ready = True  # An uncertain input is not a new discovery request.
-                sleep_current(state)
-                sleep_checked = True
-            spread, process = fold_and_process(serial)
-            if spread not in ("0", "1"):
-                raise subprocess.CalledProcessError(1, "getprop")
-            connection_ready = True
-            if seen_issue:
-                print("Glasses/server connection restored", flush=True)
-                seen_issue = None
-                # A delivered intent is not proof the Activity fetched it.
-                # It rejects already-read/closed revisions itself; recovery
-                # must also give an interrupted fetch another notification.
-                woken = None
-            if spread == "0":
-                folded = True
-                bootstrapped = False
-                last_running = False
-            elif folded:
-                # Consume before side effects: a lost reply must not relaunch.
-                folded = False
-                mute(serial)
-                adb(serial, "shell", "input", "-d", "0", "keyevent", "KEYCODE_WAKEUP")
-                adb(serial, "shell", "am", "start", "-W", "-n", COMPONENT, "--ez", "chooser", "true")
-                print("Glasses unfolded: chooser started", flush=True)
-            else:
-                key = (state["generation"], state["session_id"])
-                request = state.get("display_request")
-                answer_key = (*key, state.get("available_stage"), state.get("answer_revision"))
-                running = app_running(process)
-                last_running = running
-                if running:
-                    bootstrapped = False
-                if not stale and state.get("entry_request") == "chooser":
-                    if worn_entry != order:
-                        worn_entry = order # unknown launch is consumed; never duplicate one wear event
-                        adb(serial, "shell", "am", "start", "-W", "-n", COMPONENT, "--ez", "chooser", "true",
-                            "--ez", "wear_origin", "true", "--el", "wear_generation", str(state["generation"]))
-                elif not bootstrapped and not running:
-                    bootstrapped = True
-                    # Arms open is only an entrance for the actual proximity sensor.
-                    adb(serial, "shell", "am", "start", "-W", "-n", COMPONENT,
-                        "--ez", "chooser", "true", "--ez", "wear_bootstrap", "true")
-                elif not stale and answer_unreceived(state):
-                    retry = "ack_answer_revision" in state and time.monotonic() >= next_answer_retry
-                    if woken != answer_key or retry:
-                        # The Activity validates its current phase/session/generation before lighting.
-                        # A completed run can race the phone's earlier ready snapshot.
-                        revision = ("--el", "answer_revision", str(state["answer_revision"])) if "answer_revision" in state else ()
-                        try:
-                            # Muted first, as before, and in the wake's own round trip:
-                            # the wearer waits for the answers through every one of them.
-                            mute(serial, then=("am", "start", "-W", "-n", COMPONENT,
-                                               "--ei", "wake_session_id", str(state["session_id"]),
-                                               "--el", "wake_generation", str(state["generation"]), *revision))
-                        except (subprocess.SubprocessError, OSError):
-                            power_event("wake", "unknown", state)
-                            raise
-                        power_event("wake", "dispatched", state)
-                        woken = answer_key
-                        next_answer_retry = time.monotonic() + ANSWER_RETRY_SECONDS
-                elif not stale and not sleep_checked and (request == "sleep" or (request is None and state["phase"] in ("analyzing", "writing_done", "closed"))):
+            if device_read_due(state, stale):
+                device_read_for = read_basis(state)  # As it stands before this pass changes any of it.
+                sleep_checked = False
+                if (last_running and not folded and not stale and state.get("display_request") == "sleep"
+                    and state.get("entry_request") != "chooser" and not answer_unreceived(state)):
+                    # An already-running app's explicit idle request has priority
+                    # over slow fold/pidof/audio diagnostics. Cold bootstrap and a
+                    # known fold still take their ordinary entry path below.
+                    connection_ready = True  # An uncertain input is not a new discovery request.
                     sleep_current(state)
-            if time.monotonic() - last_volume_check >= 1:
-                last_volume_check = time.monotonic()
-                check_volume(serial)
+                    sleep_checked = True
+                spread, process = fold_and_process(serial)
+                if spread not in ("0", "1"):
+                    raise subprocess.CalledProcessError(1, "getprop")
+                device_read_at = time.monotonic()
+                connection_ready = True
+                if seen_issue:
+                    print("Glasses/server connection restored", flush=True)
+                    seen_issue = None
+                    # A delivered intent is not proof the Activity fetched it.
+                    # It rejects already-read/closed revisions itself; recovery
+                    # must also give an interrupted fetch another notification.
+                    woken = None
+                if spread == "0":
+                    folded = True
+                    bootstrapped = False
+                    last_running = False
+                elif folded:
+                    # Consume before side effects: a lost reply must not relaunch.
+                    folded = False
+                    mute(serial)
+                    adb(serial, "shell", "input", "-d", "0", "keyevent", "KEYCODE_WAKEUP")
+                    adb(serial, "shell", "am", "start", "-W", "-n", COMPONENT, "--ez", "chooser", "true")
+                    print("Glasses unfolded: chooser started", flush=True)
+                else:
+                    key = (state["generation"], state["session_id"])
+                    request = state.get("display_request")
+                    answer_key = (*key, state.get("available_stage"), state.get("answer_revision"))
+                    running = app_running(process)
+                    last_running = running
+                    if running:
+                        bootstrapped = False
+                    if not stale and state.get("entry_request") == "chooser":
+                        if worn_entry != order:
+                            worn_entry = order # unknown launch is consumed; never duplicate one wear event
+                            adb(serial, "shell", "am", "start", "-W", "-n", COMPONENT, "--ez", "chooser", "true",
+                                "--ez", "wear_origin", "true", "--el", "wear_generation", str(state["generation"]))
+                    elif not bootstrapped and not running:
+                        bootstrapped = True
+                        # Arms open is only an entrance for the actual proximity sensor.
+                        adb(serial, "shell", "am", "start", "-W", "-n", COMPONENT,
+                            "--ez", "chooser", "true", "--ez", "wear_bootstrap", "true")
+                    elif not stale and answer_unreceived(state):
+                        retry = "ack_answer_revision" in state and time.monotonic() >= next_answer_retry
+                        if woken != answer_key or retry:
+                            # The Activity validates its current phase/session/generation before lighting.
+                            # A completed run can race the phone's earlier ready snapshot.
+                            revision = ("--el", "answer_revision", str(state["answer_revision"])) if "answer_revision" in state else ()
+                            try:
+                                # Muted first, as before, and in the wake's own round trip:
+                                # the wearer waits for the answers through every one of them.
+                                mute(serial, then=("am", "start", "-W", "-n", COMPONENT,
+                                                   "--ei", "wake_session_id", str(state["session_id"]),
+                                                   "--el", "wake_generation", str(state["generation"]), *revision))
+                            except (subprocess.SubprocessError, OSError):
+                                power_event("wake", "unknown", state)
+                                raise
+                            power_event("wake", "dispatched", state)
+                            woken = answer_key
+                            next_answer_retry = time.monotonic() + ANSWER_RETRY_SECONDS
+                    elif not stale and not sleep_checked and (request == "sleep" or (request is None and state["phase"] in ("analyzing", "writing_done", "closed"))):
+                        sleep_current(state)
+                if time.monotonic() - last_volume_check >= 1:
+                    last_volume_check = time.monotonic()
+                    check_volume(serial)
         except (StateUnavailable, subprocess.SubprocessError, OSError, ValueError) as error:
+            device_read_at = None  # Whatever failed, the next pass that gets that far reads the glasses.
             code = str(error) if isinstance(error, StateUnavailable) else "glasses_unavailable"
             if not isinstance(error, StateUnavailable):
                 verified = False
