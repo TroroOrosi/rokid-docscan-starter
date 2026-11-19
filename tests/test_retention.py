@@ -6,6 +6,7 @@ import hashlib
 import json
 import os
 import sqlite3
+import threading
 import time
 from contextlib import closing
 from pathlib import Path
@@ -48,6 +49,15 @@ def settle(document, index, status):
         page_clips.fail(document, index, clip["sha256"], "too dark")
 
 
+def sweeps_ended():
+    """A finalize starts a sweep on a thread of its own, and that sweep prints its one line whenever it gets there.
+    On 2026-11-19 it got there after this test had emptied the captured output (once in four runs of the suite), and
+    the test read two lines where it expected its own."""
+    for thread in threading.enumerate():
+        if thread.name == "retention":
+            thread.join(30)
+
+
 def test_the_clip_of_a_gathered_page_is_kept_three_days_and_then_goes(client, capsys, monkeypatch):
     """Not at once when its booklet goes on: a use is read from its clips afterwards (which frames counted, why a
     page was not placed; the morning of 2026-11-17 was read that way a day later)."""
@@ -59,6 +69,7 @@ def test_the_clip_of_a_gathered_page_is_kept_three_days_and_then_goes(client, ca
     done_at = time.time()
     assert counts(retention.sweep()) == COUNTS and len(kept()) == 1
     assert client.post(f"/v1/documents/{document}/finalize").status_code == 200
+    sweeps_ended()
     assert counts(retention.sweep(now=done_at + 2.9 * DAY)) == COUNTS and len(kept()) == 1, "read after the use"
     monkeypatch.setenv("ROKID_KEEP_DONE_CLIP_DAYS", "30")
     assert counts(retention.sweep(now=done_at + 29 * DAY)) == COUNTS and len(kept()) == 1
@@ -207,6 +218,7 @@ def test_free_space_is_reported_with_every_sweep(client, monkeypatch, capsys):
 
     monkeypatch.setattr(retention.shutil, "disk_usage", usage)
     assert retention.free_bytes() == 40 and asked == [config.DATA_DIR]
+    sweeps_ended()  # the one the server's start began
     capsys.readouterr()
     result = retention.sweep()
     assert result["free_bytes"] == 40 and counts(result) == COUNTS
