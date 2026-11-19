@@ -2132,11 +2132,14 @@ final class GlassCamera implements PageCamera {
     }
 
     /** Different stream aspects are centre-cropped by Camera2; a guide must show the full JPEG. */
-    static Size previewSize(Size[] sizes, Size jpeg) {
+    static Size previewSize(Size[] sizes, Size jpeg) { return previewSize(sizes, jpeg, 320, 240); }
+
+    /** The smallest size of the still's shape that is at least this large. */
+    static Size previewSize(Size[] sizes, Size jpeg, int leastWidth, int leastHeight) {
         if (sizes == null || jpeg == null) return null;
         Size smallest = null;
         for (Size candidate : sizes) {
-            if (candidate.getWidth() < 320 || candidate.getHeight() < 240
+            if (candidate.getWidth() < leastWidth || candidate.getHeight() < leastHeight
                     || (long) candidate.getWidth() * jpeg.getHeight()
                     != (long) candidate.getHeight() * jpeg.getWidth()) continue;
             if (smallest == null || (long) candidate.getWidth() * candidate.getHeight()

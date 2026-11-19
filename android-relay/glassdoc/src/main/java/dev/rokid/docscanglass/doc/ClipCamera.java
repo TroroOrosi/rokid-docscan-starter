@@ -17,6 +17,7 @@ import android.hardware.camera2.CameraManager;
 import android.hardware.camera2.CaptureRequest;
 import android.hardware.camera2.CaptureResult;
 import android.hardware.camera2.TotalCaptureResult;
+import android.hardware.camera2.params.MeteringRectangle;
 import android.hardware.camera2.params.OutputConfiguration;
 import android.hardware.camera2.params.SessionConfiguration;
 import android.hardware.camera2.params.StreamConfigurationMap;
@@ -110,6 +111,18 @@ final class ClipCamera implements PageCamera {
          * 2-24). Kept so that another limit can be tried.
          */
         float farShare = 0f;
+        /**
+         * The watch preview takes the whole field (twice the size each way, so that its middle half is the picture
+         * the watching goes by) and the automatic exposure is asked to meter the middle half, which a clip records.
+         * Off: the watch preview is that middle half alone, as it has been. For telling a sheet larger than the
+         * recorded frame (register 2-59); from one launch's extra only until it has been measured on the glasses.
+         */
+        boolean wholeWatch;
+        /**
+         * With wholeWatch: what the watch sees is kept there, a quarter-size picture at most five times a second,
+         * for one worn pass. Closed with the camera. Null in every use.
+         */
+        FieldRecord fieldRecord;
     }
 
     /** What the small window shows beside the image; called from the camera's and the frames' threads. */
@@ -123,6 +136,12 @@ final class ClipCamera implements PageCamera {
          */
         void showClipProgress(int counted, int wanted, boolean recording);
         void showFar(boolean far);
+        /**
+         * Which picture the small window is given from now on. {@code wholeWatch}: the camera watches the whole
+         * field, of which a clip records the middle half; then {@code field} says whether the picture is that whole
+         * field (watching) or a clip's own frame (recording). Without wholeWatch every picture is what a clip records.
+         */
+        default void showFieldPicture(boolean wholeWatch, boolean field) { }
     }
 
     static final int WIDTH = 2016, HEIGHT = 1512, FPS = 30, WATCH_FPS = 15, ISO = 800;
@@ -259,6 +278,11 @@ final class ClipCamera implements PageCamera {
     private HandlerThread framesThread;
     private Handler frames;
     private Rect crop;
+    /** The whole sensor, and the middle half of the watch frame when the whole field is watched (wholeWatch). */
+    private Rect field;
+    private byte[] middleLuma;
+    private int middleWidth, middleHeight;
+    private long fieldLevel;
     private boolean wanted, closed, opening, closing, configuring;
     private int running, cameraFailures;
     /** Counts the cameras asked for: a callback of an earlier one is not the present camera's. */
@@ -411,6 +435,7 @@ final class ClipCamera implements PageCamera {
     @Override public void close(Runnable completed) {
         handler.post(() -> {
             if (completed != null) closeCallbacks.add(completed);
+            if (!closed && options.fieldRecord != null) options.fieldRecord.close();
             closed = true;
             wanted = false;
             pageReady = null;
@@ -514,9 +539,12 @@ final class ClipCamera implements PageCamera {
             int width = array.width() / 2, height = array.height() / 2;
             crop = new Rect(array.centerX() - width / 2, array.centerY() - height / 2,
                     array.centerX() + width / 2, array.centerY() + height / 2);
+            field = new Rect(array);
             StreamConfigurationMap map = characteristics.get(CameraCharacteristics.SCALER_STREAM_CONFIGURATION_MAP);
+            // Watching the whole field: twice the watch picture's size each way, so that its middle half is the
+            // picture everything here has gone by (6.3 sensor pixels to one of it).
             Size size = GlassCamera.previewSize(map == null ? null : map.getOutputSizes(ImageFormat.YUV_420_888),
-                    GlassCamera.largestJpegSize(characteristics));
+                    GlassCamera.largestJpegSize(characteristics), options.wholeWatch ? 640 : 320, options.wholeWatch ? 480 : 240);
             if (size == null) throw new IllegalStateException("no watch preview size");
             framesThread = new HandlerThread("clip-frames");
             framesThread.start();
@@ -626,7 +654,13 @@ final class ClipCamera implements PageCamera {
         CaptureRequest.Builder request = device.createCaptureRequest(CameraDevice.TEMPLATE_PREVIEW);
         request.addTarget(watchReader.getSurface());
         request.set(CaptureRequest.CONTROL_AE_TARGET_FPS_RANGE, new Range<>(WATCH_FPS, WATCH_FPS));
-        request.set(CaptureRequest.SCALER_CROP_REGION, crop);
+        request.set(CaptureRequest.SCALER_CROP_REGION, options.wholeWatch ? field : crop);
+        if (options.wholeWatch) {
+            // The clip's fixed exposure is matched to this preview's automatic one, and a clip is the middle half:
+            // the light is measured there, not over the desk around the paper (the camera lists one such region).
+            request.set(CaptureRequest.CONTROL_AE_REGIONS, new MeteringRectangle[]{
+                    new MeteringRectangle(crop, MeteringRectangle.METERING_WEIGHT_MAX)});
+        }
         return request.build();
     }
 
@@ -658,9 +692,13 @@ final class ClipCamera implements PageCamera {
         }, handler);
     }
 
+    /** Clips begun since this camera was made: written beside each kept watch picture (FieldRecord). */
+    private int clipsBegun;
+
     /** The light is known: open the clip, then leave the watch session for the clip's. */
     private void begin() {
         Clip starting = clip;
+        clipsBegun++;
         handler.removeCallbacks(timer);
         starting.previewExposure = previewExposure;
         starting.previewIso = previewIso;
@@ -712,7 +750,11 @@ final class ClipCamera implements PageCamera {
             long now = SystemClock.elapsedRealtime();
             byte[] grid;
             synchronized (lock) { // the frames' thread copies the next watch frame into the same array
-                grid = watchFresh ? SamePage.grid(watchLuma, watchBytes, watchWidth, watchHeight, watchRow, watchStep) : null;
+                grid = !watchFresh ? null
+                        // The middle half is this thread's own copy, made from the frame before (watchFrame).
+                        : options.wholeWatch ? (middleLuma == null ? null : SamePage.grid(middleLuma,
+                                middleWidth * middleHeight, middleWidth, middleHeight, middleWidth, 1))
+                        : SamePage.grid(watchLuma, watchBytes, watchWidth, watchHeight, watchRow, watchStep);
             }
             starting.grid = grid;
             starting.gridAt = now;
@@ -883,8 +925,20 @@ final class ClipCamera implements PageCamera {
         }
     }
 
+    /** The display is told which picture comes next, once for each change (Marks.showFieldPicture). */
+    private int pictureTold = -1;
+
+    private void tellPicture(boolean field) {
+        int now = !options.wholeWatch ? 0 : field ? 1 : 2;
+        if (pictureTold == now) return;
+        pictureTold = now;
+        Marks shown = marks;
+        if (shown != null) shown.showFieldPicture(options.wholeWatch, field);
+    }
+
     /** The frame being recorded, in the small window: a row at a time, as each read of the camera's buffer is a native call. */
     private void show(ByteBuffer luma, int row) {
+        tellPicture(false);
         int width = 320, height = width * HEIGHT / WIDTH;
         if (line == null) line = new byte[WIDTH];
         int[] display = new int[width * height];
@@ -1151,9 +1205,34 @@ final class ClipCamera implements PageCamera {
                 if (!steady && now - settlingSince < GlassCamera.RESUME_SETTLE_LIMIT_MILLIS) return;
                 settlingSince = 0;
             }
+            if (options.wholeWatch && options.fieldRecord != null) {
+                // After the settling: back from a clip the exposure starts over and the first picture was black.
+                options.fieldRecord.offer(watchLuma, watchWidth, watchHeight, watchRow, watchStep,
+                        System.currentTimeMillis(), timestamp, clipsBegun, now);
+            }
             int width = watchWidth, height = watchHeight;
             ByteBuffer pixels = ByteBuffer.wrap(watchLuma, 0, watchBytes);
             int row = watchRow, step = watchStep;
+            if (options.wholeWatch) {
+                // The frame is the whole field. Everything below goes by its middle half, the part a clip records,
+                // copied out at the size the watch picture has always had. (The frames' thread leaves the frame alone
+                // while this one works on it: watchPending.)
+                int w = width / 2, h = height / 2, left = (width - w) / 2, top = (height - h) / 2;
+                if (middleLuma == null || middleLuma.length < w * h) middleLuma = new byte[w * h];
+                long all = 0;
+                int sampled = 0;
+                for (int y = 0; y < height; y += 8) for (int x = 0; x < width; x += 8, sampled++) all += watchLuma[y * row + x * step] & 255;
+                fieldLevel = sampled == 0 ? 0 : all / sampled;
+                for (int y = 0; y < h; y++) {
+                    int from = (top + y) * row + left * step;
+                    if (step == 1) System.arraycopy(watchLuma, from, middleLuma, y * w, w);
+                    else for (int x = 0; x < w; x++) middleLuma[y * w + x] = watchLuma[from + x * step];
+                }
+                middleWidth = w;
+                middleHeight = h;
+                pixels = ByteBuffer.wrap(middleLuma, 0, w * h);
+                width = w; height = h; row = w; step = 1;
+            }
             byte[] thumbnail = PageChange.cells(pixels, 0, width, height, row, step); // means: one pixel a cell is noise
             int level = 0;
             for (byte value : thumbnail) level += value & 255;
@@ -1177,12 +1256,19 @@ final class ClipCamera implements PageCamera {
             }
             if (now - displayAt >= 100) {
                 displayAt = now;
-                int shownWidth = Math.min(320, width), shownHeight = Math.max(1, shownWidth * height / width);
+                // The small window: the whole field where it is watched (the display draws the frame of what a clip
+                // records on it), else what a clip records.
+                boolean whole = options.wholeWatch;
+                int fromWidth = whole ? watchWidth : width, fromHeight = whole ? watchHeight : height;
+                int fromRow = whole ? watchRow : row, fromStep = whole ? watchStep : step;
+                ByteBuffer from = whole ? ByteBuffer.wrap(watchLuma, 0, watchBytes) : pixels;
+                int shownWidth = Math.min(320, fromWidth), shownHeight = Math.max(1, shownWidth * fromHeight / fromWidth);
                 int[] display = new int[shownWidth * shownHeight];
                 for (int y = 0; y < shownHeight; y++) for (int x = 0; x < shownWidth; x++) {
-                    int gray = pixels.get(y * height / shownHeight * row + x * width / shownWidth * step) & 255;
+                    int gray = from.get(y * fromHeight / shownHeight * fromRow + x * fromWidth / shownWidth * fromStep) & 255;
                     display[y * shownWidth + x] = 0xFF000000 | (gray << 8);
                 }
+                tellPicture(true);
                 callback.onPreview(Bitmap.createBitmap(display, shownWidth, shownHeight, Bitmap.Config.RGB_565), null);
             }
             if (clip == null && pageReady != null && passOver && pageChange.ready(now)) {
@@ -1203,7 +1289,9 @@ final class ClipCamera implements PageCamera {
             if (now - statusAt >= 1000) {
                 UseLog.i(TAG, "watch_status frames=" + watchFrames + " max_work_ms=" + watchWorkNanos / 1_000_000
                         + " exposure_ns=" + previewExposure + " iso=" + previewIso + " boost=" + previewBoost
-                        + " far=" + far + " lines=" + (lines > 0 ? Math.round(lines * 10) / 10f : "-"));
+                        + " far=" + far + " lines=" + (lines > 0 ? Math.round(lines * 10) / 10f : "-")
+                        // The whole field watched: the mean level of the middle half, which is metered, and of all of it.
+                        + (options.wholeWatch ? " field=whole middle=" + level / thumbnail.length + " all=" + fieldLevel : ""));
                 statusAt = now;
                 watchFrames = 0;
                 watchWorkNanos = 0;

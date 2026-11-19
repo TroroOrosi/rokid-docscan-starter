@@ -121,6 +121,28 @@ final class HudView extends View {
         invalidate();
     }
 
+    /**
+     * What the live picture is. 0: what a clip records, shown cut to its paper, as it always was. 1: the whole field
+     * (ClipCamera.Options.wholeWatch), of which a clip records the middle half: shown whole, with a frame around that
+     * half. 2: the whole field is watched and this picture is a clip's own frame: shown where the frame stands.
+     */
+    private int fieldPicture;
+
+    void showFieldPicture(boolean wholeWatch, boolean field) {
+        int now = !wholeWatch ? 0 : field ? 1 : 2;
+        if (fieldPicture == now) return;
+        fieldPicture = now;
+        if (now != 0) { liveBox = null; liveMisses = 0; past = null; }
+        invalidate();
+    }
+
+    /** The middle half, each way, of the corner's picture: what a clip records of the whole field. */
+    private RectF recordedPart(Bitmap picture) {
+        RectF whole = imageBounds(picture);
+        return new RectF(whole.left + whole.width() / 4f, whole.top + whole.height() / 4f,
+                whole.right - whole.width() / 4f, whole.bottom - whole.height() / 4f);
+    }
+
     void capturePreview(boolean active) {
         capturing = active;
         if (!active) { paperProposal = null; liveBox = null; liveMisses = 0; clipRecording = false; clipWeak = false; far = false; past = null; }
@@ -136,6 +158,15 @@ final class HudView extends View {
         Bitmap previous = livePreview;
         livePreview = bitmap;
         paperProposal = proposal;
+        if (fieldPicture != 0) {
+            // The whole field with its frame: nothing is cut to the paper, and the picture itself shows where the
+            // paper runs on beyond what is recorded.
+            liveBox = null;
+            past = null;
+            if (previous != null && previous != bitmap && !previous.isRecycled()) previous.recycle();
+            invalidate();
+            return;
+        }
         // Display only. The comparison corners describe the whole frame, so that launch keeps it whole.
         int[] found = proposal != null ? null : PaperCrop.boxOf(bitmap);
         if (found == null && liveBox != null && proposal == null && ++liveMisses < LIVE_MISSES) found = liveBox;
@@ -419,6 +450,18 @@ final class HudView extends View {
         guidePaint.setStrokeWidth(2f);
         Bitmap frame = livePreview;
         if (frame == null || frame.isRecycled()) return;
+        if (fieldPicture != 0) {
+            // The frame: what lies inside it is what a clip records. Dark on both sides of the bright line, because
+            // a sheet larger than the frame fills the field with paper and a bright line on paper cannot be seen.
+            RectF part = recordedPart(frame);
+            guidePaint.setColor(Color.BLACK);
+            guidePaint.setStrokeWidth(8f);
+            canvas.drawRect(part, guidePaint);
+            guidePaint.setColor(GREEN);
+            guidePaint.setStrokeWidth(2f);
+            canvas.drawRect(part, guidePaint);
+            return;
+        }
         int[] crop = PaperCrop.pixels(frame, liveBox);
         if (crop != null) {
             // The line is the limit of what the camera sees: paper that reaches it is cut off in the photo.
@@ -453,6 +496,7 @@ final class HudView extends View {
     private void drawPreview(Canvas canvas, Bitmap still) {
         int[] crop = still == livePreview ? PaperCrop.pixels(still, liveBox) : null;
         RectF target = crop == null ? imageBounds(still) : fit(crop[2] - crop[0], crop[3] - crop[1]);
+        if (still == livePreview && fieldPicture == 2) target = recordedPart(still);
         canvas.save();
         canvas.clipRect(captureArea());
         canvas.drawBitmap(still, crop == null ? null : new android.graphics.Rect(crop[0], crop[1], crop[2], crop[3]),

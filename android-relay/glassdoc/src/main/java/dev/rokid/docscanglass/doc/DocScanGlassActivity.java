@@ -457,6 +457,16 @@ public final class DocScanGlassActivity extends Activity
             ClipCamera.Options options = new ClipCamera.Options();
             options.rotationDegrees = MEASURED_ROTATION_DEGREES;
             options.targetFrames = clipFrames(getIntent(), options.targetFrames);
+            // --ez watch_field true, for this launch only and never saved: the watch preview takes the whole field
+            // (ClipCamera.Options.wholeWatch). For measuring it on the glasses before anything relies on it.
+            options.wholeWatch = getIntent() != null && getIntent().getBooleanExtra("watch_field", false);
+            // --ez watch_record true beside it: what that watch sees is kept for a worn pass (FieldRecord), where
+            // adb can read it. This launch only.
+            File kept = getExternalFilesDir(null);
+            if (options.wholeWatch && kept != null && getIntent().getBooleanExtra("watch_record", false)) {
+                options.fieldRecord = new FieldRecord(new File(kept, "field-watch.bin"),
+                        java.util.concurrent.Executors.newSingleThreadExecutor(), FieldRecord.MAX_BYTES);
+            }
             options.farShare = getPreferences(MODE_PRIVATE).getFloat(EXTRA_FAR_SHARE, options.farShare);
             options.longExposureNanos = longExposure(getPreferences(MODE_PRIVATE), options.longExposureNanos);
             options.longAboveBoost = getPreferences(MODE_PRIVATE).getInt(EXTRA_LONG_ABOVE, options.longAboveBoost);

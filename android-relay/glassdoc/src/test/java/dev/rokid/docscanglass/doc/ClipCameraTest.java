@@ -159,8 +159,10 @@ public class ClipCameraTest {
                 progressAt.add(SystemClock.elapsedRealtime());
             }
             @Override public void showFar(boolean value) { far.add(value); }
+            @Override public void showFieldPicture(boolean wholeWatch, boolean field) { fieldPictures.add(wholeWatch + ":" + field); }
         });
     }
+    private final List<String> fieldPictures = new ArrayList<>();
 
     private void idle(long millis) { shadowOf(Looper.getMainLooper()).idleFor(Duration.ofMillis(millis)); }
     private DocScanTestCamera device() { return ManagerShadow.devices.get(ManagerShadow.devices.size() - 1); }
@@ -298,6 +300,108 @@ public class ClipCameraTest {
         idle(70); watchFrame(false);
         assertEquals("the live image goes to the small window", 1, previews);
         assertEquals(List.of("image.close"), watchImages);
+    }
+
+    private void wholeField() {
+        camera.close(); idle(2000);
+        MapShadow.previewSize = new Size(640, 480);
+        ClipCamera.Options options = new ClipCamera.Options();
+        options.wholeWatch = true;
+        create(options);
+    }
+
+    /** A frame of the whole field, 64x48: desk (40) around a sheet (180) in its middle half, each with one change. */
+    private void fieldFrame(boolean changedInTheMiddle, boolean changedOutside) {
+        byte[] pixels = new byte[64 * 48]; Arrays.fill(pixels, (byte) 40);
+        for (int y = 12; y < 36; y++) Arrays.fill(pixels, y * 64 + 16, y * 64 + 48, (byte) 180);
+        if (changedInTheMiddle) for (int y = 12; y < 22; y++) Arrays.fill(pixels, y * 64 + 16, y * 64 + 48, (byte) 70);
+        if (changedOutside) for (int y = 0; y < 10; y++) Arrays.fill(pixels, y * 64, y * 64 + 64, (byte) 200);
+        DocScanTestImage image = new DocScanTestImage(watchImages);
+        image.format = ImageFormat.YUV_420_888; image.width = 64; image.height = 48;
+        image.rowStride = 64; image.pixelStride = 1;
+        image.timestamp = SystemClock.elapsedRealtimeNanos(); image.buffer = ByteBuffer.wrap(pixels);
+        ReaderShadow watch = reader(640);
+        watch.image = image; watch.listener.onImageAvailable(watch.reader);
+        idle(0);
+    }
+
+    @Test public void the_whole_field_can_be_watched_with_the_light_measured_where_a_clip_is_recorded() {
+        // 2026-11-19: a sheet larger than the recorded frame cannot be told from the frame alone (register 2-59).
+        // The watch preview takes the whole field, twice as large each way, so that its middle half is the picture
+        // the watching has always gone by; the automatic exposure is asked to meter that middle half (the camera
+        // lists one metering region), because the clip's fixed exposure is matched to it.
+        wholeField();
+        camera.preview(); idle(100);
+        ReaderShadow watch = reader(640);
+        assertEquals(480, watch.height);
+        assertEquals("the whole sensor", new Rect(0, 0, 4032, 3024), asked(CaptureRequest.SCALER_CROP_REGION));
+        android.hardware.camera2.params.MeteringRectangle[] metered =
+                (android.hardware.camera2.params.MeteringRectangle[]) asked(CaptureRequest.CONTROL_AE_REGIONS);
+        assertEquals(1, metered.length);
+        assertEquals("the middle half, which a clip records", new Rect(1008, 756, 3024, 2268), metered[0].getRect());
+        assertEquals(android.hardware.camera2.params.MeteringRectangle.METERING_WEIGHT_MAX, metered[0].getMeteringWeight());
+    }
+
+    @Test public void watching_the_whole_field_a_page_is_still_what_changes_in_the_middle_half() {
+        wholeField();
+        AtomicInteger ready = new AtomicInteger();
+        camera.awaitNextPage(ready::incrementAndGet); idle(100);
+        light(50_000_000L, 800, 423, CONTROL_AE_STATE_CONVERGED);
+        fieldFrame(false, false); idle(400); fieldFrame(false, false);
+        assertEquals("the page in the middle is offered once it lies still", 1, ready.get());
+        camera.captureOnce(); idle(0);
+        idleSession(0); clipFrames(66, 0); idle(0); idleSession(1); fieldFrame(false, false);
+        assertEquals(1, pages.size());
+        camera.awaitNextPage(ready::incrementAndGet); idle(0);
+        light(50_000_000L, 800, 423, CONTROL_AE_STATE_CONVERGED);
+        idle(100); fieldFrame(false, true); idle(500); fieldFrame(false, true); idle(500); fieldFrame(false, true);
+        assertEquals("what moves beside the recorded frame is no page", 1, ready.get());
+        assertTrue("the display is told which picture it has: the whole field while watching", fieldPictures.contains("true:true"));
+        assertTrue("and a clip's own frame while one is recorded", fieldPictures.contains("true:false"));
+        idle(100); fieldFrame(true, true); idle(500); fieldFrame(true, true);
+        assertEquals("what changes inside it is", 2, ready.get());
+    }
+
+    @Test public void asked_to_the_whole_field_watch_is_kept_with_the_clips_begun_so_far() throws Exception {
+        // For one worn pass (register 2-59): where the recorded frame lay on a sheet can only be worked out from what
+        // the whole field showed before each clip, and a desk has no head that moves.
+        camera.close(); idle(2000);
+        MapShadow.previewSize = new Size(640, 480);
+        File file = new File(RuntimeEnvironment.getApplication().getFilesDir(), "field-watch.bin");
+        file.delete();
+        ClipCamera.Options options = new ClipCamera.Options();
+        options.wholeWatch = true;
+        options.fieldRecord = new FieldRecord(file, Runnable::run, FieldRecord.MAX_BYTES);
+        create(options);
+        AtomicInteger ready = new AtomicInteger();
+        camera.awaitNextPage(ready::incrementAndGet); idle(100);
+        light(50_000_000L, 800, 423, CONTROL_AE_STATE_CONVERGED);
+        fieldFrame(false, false); idle(400); fieldFrame(false, false);
+        camera.captureOnce(); idle(0);
+        // Back from the clip the preview's exposure starts over: on the glasses the first picture was black. Not kept.
+        idleSession(0); clipFrames(66, 0); idle(0); idleSession(1); idle(300); fieldFrame(false, false);
+        light(50_000_000L, 800, 423, CONTROL_AE_STATE_CONVERGED);
+        idle(300); fieldFrame(false, false);
+        camera.close(); idle(2000);
+
+        assertEquals("two pictures before the clip, one after it once the light had settled",
+                3L * FieldRecord.RECORD_BYTES, file.length());
+        List<Integer> clipsBegun = new ArrayList<>();
+        byte[] first = null;
+        try (java.io.DataInputStream in = new java.io.DataInputStream(new java.io.FileInputStream(file))) {
+            for (long at = 0; at + FieldRecord.RECORD_BYTES <= file.length(); at += FieldRecord.RECORD_BYTES) {
+                in.readLong(); in.readLong();
+                clipsBegun.add(in.readInt());
+                byte[] pixels = new byte[FieldRecord.WIDTH * FieldRecord.HEIGHT];
+                in.readFully(pixels);
+                if (first == null) first = pixels;
+            }
+        }
+        assertTrue("frames before the clip and one after it: " + clipsBegun, clipsBegun.size() >= 3);
+        assertEquals("no clip had begun when watching started", 0, (int) clipsBegun.get(0));
+        assertEquals("one had when watching came back", 1, (int) clipsBegun.get(clipsBegun.size() - 1));
+        assertEquals("the whole field, not its middle: the desk in the corner", 40, first[0] & 255);
+        assertEquals("and the sheet in the middle", 180, first[FieldRecord.HEIGHT / 2 * FieldRecord.WIDTH + FieldRecord.WIDTH / 2] & 255);
     }
 
     @Test public void a_watch_frame_is_returned_at_once_whatever_the_cameras_thread_is_doing() {

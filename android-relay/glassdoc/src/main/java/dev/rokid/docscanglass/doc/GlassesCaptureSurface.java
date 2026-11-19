@@ -230,6 +230,10 @@ final class GlassesCaptureSurface implements CaptureSurface, ClipCamera.Marks {
     }
 
     /** The paper fills too little of the small window; never called unless the mark was turned on. From the camera's thread. */
+    @Override public void showFieldPicture(boolean wholeWatch, boolean field) {
+        main.post(() -> { if (!closed) hud.showFieldPicture(wholeWatch, field); });
+    }
+
     @Override public void showFar(boolean far) {
         main.post(() -> { if (!closed) hud.showFar(far); });
     }

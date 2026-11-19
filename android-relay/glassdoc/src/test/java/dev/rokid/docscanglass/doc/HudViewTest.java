@@ -335,6 +335,70 @@ public class HudViewTest {
         screen.recycle();
     }
 
+    /**
+     * The operator, 2026-11-19: adjust the frame so that a capture is sure. A clip records the middle half of the
+     * field and the small window showed that half alone, cut to its paper: the wearer could not see where the paper
+     * went on beyond it (their sheets ran past it on most captures, and lay below its middle). The window shows the
+     * whole field as the camera sees it, and a frame where a clip records.
+     */
+    @Test public void theWholeFieldIsShownWithAFrameWhereAClipRecords() {
+        HudView view = new HudView(RuntimeEnvironment.getApplication());
+        view.layout(0, 0, 480, 640);
+        view.capturePreview(true);
+        view.showAiming(List.of());
+        view.showFieldPicture(true, true);
+        view.showLivePreview(liveFrame(40, 200));
+        Bitmap screen = Bitmap.createBitmap(480, 640, Bitmap.Config.ARGB_8888);
+        view.draw(new Canvas(screen));
+        // The 240x320 field across the corner [328,440,472,632]: 0.6 to one. The sheet: x 352..448, y 500..572.
+        assertEquals("the desk beside the sheet is in the picture: nothing is cut to the paper", 20, Color.green(screen.getPixel(338, 470)));
+        assertEquals("the sheet where it lies in the field", 200, Color.green(screen.getPixel(440, 536)));
+        // What a clip records is the middle half each way: x 364..436, y 488..584.
+        for (int[] at : new int[][]{{364, 536}, {436, 536}, {400, 488}, {400, 584}}) {
+            boolean line = false;
+            for (int dx = -1; dx <= 1; dx++) for (int dy = -1; dy <= 1; dy++) {
+                line |= Color.red(screen.getPixel(at[0] + dx, at[1] + dy)) == 0x40;
+            }
+            assertTrue("the frame's line at " + at[0] + "," + at[1], line);
+        }
+        assertEquals("no line on the window's own edge", 0, Color.red(screen.getPixel(329, 536)));
+        assertCornerOnly(screen);
+
+        // While a clip is recorded the picture is the clip's own frame: it stands where the frame stood.
+        Bitmap recorded = Bitmap.createBitmap(240, 320, Bitmap.Config.ARGB_8888);
+        recorded.eraseColor(Color.rgb(0, 200, 0));
+        view.showFieldPicture(true, false);
+        view.showLivePreview(recorded);
+        view.draw(new Canvas(screen));
+        assertEquals("inside the frame", 200, Color.green(screen.getPixel(400, 536)));
+        assertEquals("nothing beside it", 0, Color.green(screen.getPixel(338, 470)));
+        assertCornerOnly(screen);
+        view.capturePreview(false);
+        screen.recycle();
+    }
+
+    @Test public void theFrameCanBeToldOnPaperThatFillsTheField() {
+        // A bright line on white paper is no line, and paper is what fills the field when a sheet is larger than
+        // the frame: on the desk the line stood at 255 over a picture of 57 to 115, which a sheet would not give.
+        HudView view = new HudView(RuntimeEnvironment.getApplication());
+        view.layout(0, 0, 480, 640);
+        view.capturePreview(true);
+        view.showAiming(List.of());
+        view.showFieldPicture(true, true);
+        Bitmap paper = Bitmap.createBitmap(240, 320, Bitmap.Config.ARGB_8888);
+        paper.eraseColor(Color.rgb(0, 250, 0));
+        view.showLivePreview(paper);
+        Bitmap screen = Bitmap.createBitmap(480, 640, Bitmap.Config.ARGB_8888);
+        view.draw(new Canvas(screen));
+        // The frame's left side stands at x 364; y 536 is its middle.
+        assertEquals("dark beside the line, outside the frame", 0, Color.green(screen.getPixel(361, 536)));
+        assertEquals("dark beside the line, inside the frame", 0, Color.green(screen.getPixel(367, 536)));
+        assertEquals("the paper beyond", 250, Color.green(screen.getPixel(355, 536)));
+        assertEquals("the paper within", 250, Color.green(screen.getPixel(373, 536)));
+        view.capturePreview(false);
+        screen.recycle();
+    }
+
     @Test public void theLiveCornerDoesNotJumpForASmallMoveOrOneFrameWithoutPaper() throws Exception {
         HudView view = new HudView(RuntimeEnvironment.getApplication());
         view.layout(0, 0, 480, 640);
