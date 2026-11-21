@@ -45,11 +45,12 @@ GLASSDOC_OPERATION_CONTRACT = {
     },
     "answers": {
         "delivery": "answer-bundle",
-        # From Glasses View 1.53.0: the certain answers first, then the captures to take again, then the answers
-        # that are not certain, then those the wearer already had; no explanations among them.
-        "layout": "certain_then_retake_then_uncertain_then_seen",
+        # From Glasses View 1.54.0: the answers in the paper's order, then the captures to take again, then those
+        # the wearer already had; no explanations and no marks among them, and nothing of an answer the two reads
+        # do not settle (1.53.0 showed it behind the others with a mark).
+        "layout": "paper_order_then_retake_then_seen_without_unsettled",
         "next_previous": "swipe_past_the_last_screen_to_the_first",
-        "retake": "double_tap_while_captures_to_take_again_are_listed",
+        "retake": "double_tap_on_the_screen_that_lists_the_captures_to_take_again",
         "writing_done": "one_double_tap_then_display_sleep",
         "exit": "two_more_double_taps_within_3_seconds_while_waiting",
         "writing_done_counts_toward_exit": False,

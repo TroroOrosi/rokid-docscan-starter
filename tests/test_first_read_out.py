@@ -93,8 +93,11 @@ def test_the_compared_answers_replace_them_under_the_same_questions_and_the_mark
 
     late = bundle(client, session)
     assert shown(late["items"]) == [("問1", "ready", "④"), ("問2", "needs_review", "②")]
-    assert late["items"][1]["other"] == "③", "the other read's answer, for the glasses to show beside this one"
+    assert late["items"][1]["other"] == "③", "the other read's answer, kept in the bundle"
     assert "other" not in late["items"][0] and "comparing" not in late
+    # The glasses show no such answer: its capture is among those to take again (the operator, 2026-11-19 and, after
+    # a ？ before thirty answers, 2026-11-21). The bundle says which answers the two reads do not settle.
+    assert late["items"][1]["uncertain"] is True and "uncertain" not in late["items"][0]
     assert ids(late["items"]) == ids(cli.early["items"]), "the same questions: the glasses update in place"
     assert late["revision"] > cli.early["revision"], "a newer revision: the watcher notifies again"
     assert cli.calls == 1

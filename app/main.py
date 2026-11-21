@@ -1566,6 +1566,12 @@ def capture_check(document_id: int) -> dict:
     retake: list[int] = []
     if document["status"] == "open":
         _await_gathering(document_id, booklet=False)
+        # The desk check only (the stand-in solver): the answer is held back for as long as the phone's gathering
+        # takes in a use, 60 to 83 s on 2026-11-20. On a PC the clips are gathered in seconds, the glasses were still
+        # awake when the answer came, and a camera the system refuses to glasses asleep for over a minute was never
+        # met on the desk (the wearer met it: "restart the app").
+        if os.environ.get("ROKID_SOLVER") == "recorded":
+            time.sleep(min(180.0, max(0.0, float(os.environ.get("ROKID_CHECK_HOLD_S") or 0))))
         least = int(os.environ.get("ROKID_CHECK_MIN_USED") or _CHECK_MIN_USED)
         with closing(db.connect()) as conn:
             few = {row["page_index"] + 1 for row in page_clips.rows(document_id)
@@ -3726,6 +3732,9 @@ def _answer_bundle_item(conn, group: dict, row) -> dict:
         "status": status,
         "issue": issue,
         **({"other": other} if other else {}),
+        # What the two reads do not settle (they differ, or one of them alone gave it: the Codex route's notes all
+        # begin with 2回). The glasses show no such answer; its capture is listed to be taken again (``retake``).
+        **({"uncertain": True} if status == "needs_review" and issue.startswith("2回") else {}),
         **({"answer_no": numbers} if numbers else {}),
         **({"diagrams": diagrams} if diagrams else {}),
     }

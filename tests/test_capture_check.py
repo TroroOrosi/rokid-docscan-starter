@@ -43,6 +43,25 @@ def test_a_page_whose_clip_could_not_be_placed_is_taken_again(client, tmp_path):
     assert check(client, document) == {"document_id": document, "pages": 1, "retake": [1]}
 
 
+def test_the_desk_checks_server_can_hold_the_answer_back_as_long_as_gathering_takes_in_use(client, tmp_path, monkeypatch):
+    """On a PC the clips are gathered in seconds and the check answered while the glasses were still awake; in the
+    use of 2026-11-20 it answered 83 s after the end, the glasses asleep, and their camera was refused. The stand-in
+    server (and no other) holds its answer back for as long as it is told, so that the desk check meets that."""
+    from app import main
+
+    document, _, _ = recorded(client, tmp_path, BLANK)
+    assert main.gather_service.process_one() is True
+    monkeypatch.setenv("ROKID_CHECK_HOLD_S", "0.4")
+    monkeypatch.setenv("ROKID_SOLVER", "codex-cli")
+    began = time.monotonic()
+    assert check(client, document)["retake"] == [1]
+    assert time.monotonic() - began < 0.3, "the phone's own server never waits for it"
+    monkeypatch.setenv("ROKID_SOLVER", "recorded")
+    began = time.monotonic()
+    assert check(client, document)["retake"] == [1]
+    assert time.monotonic() - began >= 0.4
+
+
 def test_a_page_gathered_from_few_frames_is_taken_again_and_one_from_enough_is_not(client, tmp_path, monkeypatch):
     from app import main, page_clips
 

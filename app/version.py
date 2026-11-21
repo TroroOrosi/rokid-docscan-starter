@@ -434,7 +434,16 @@ from __future__ import annotations
 #         reads agree on carries no note. (4) POST /v1/exam-sessions/{id}/retake: pages taken again after the
 #         answers were read take their pages' places, the booklet is read again whole, the answers go over the
 #         questions that were shown, and an answer the wearer already had is marked `seen`.
-APP_VERSION = "0.92.0"
+# 0.93.0: the operator's use of 2026-11-20 (two subjects). A booklet without printed answer numbers came out with
+#         fifteen questions twice, thirty answers marked and moved behind the others and three good captures listed
+#         to be taken again: one read had written the groups of its first seven major problems as "1" and the
+#         other as "1." (the fourth such form; register 3-50 had been left open). (1) Two reads are lined up by a
+#         group's number when it has one and by a label without the marks at its ends; and questions still named
+#         differently are one question where both reads gave the same short answer from the same captures. The day's
+#         kept reads again: 34 questions once each and 2 answers the reads do not settle, where it was 49 and 31.
+#         (2) The answer bundle marks an answer the two reads do not settle (`uncertain`); the glasses show no such
+#         answer and its capture stays among those to take again.
+APP_VERSION = "0.93.0"
 
 # HTTP API envelope. Path prefix stays "/v1" until a breaking envelope change.
 # 1.2.0: /match responses gained the additive `ocr_similarity` field.
@@ -605,7 +614,9 @@ APP_VERSION = "0.92.0"
 #         `pages-unanswered`; optional top-level `comparing` (true) and `retake` (capture numbers from 1, at most
 #         100); optional item fields `other` (at most 200 characters, with needs_review) and `seen` (true). While
 #         a booklet is read again after a retake the bundle answers 409 "the answers are being made".
-API_VERSION = "1.56.0"
+# 1.57.0: the answer bundle's optional item field `uncertain` (true): the two reads of the booklet differ on this
+#         answer, or one of them alone gave it. With needs_review only.
+API_VERSION = "1.57.0"
 
 # Matching algorithm identity. Bump when thresholds or hashing change so a
 # re-index/eval is triggered. Mirrors thresholds in app/matching.py.
@@ -800,7 +811,14 @@ EXPLAINER_API_VERSION = "1.1.0"
 # same numbers come up before anything is sent. A tap that clears the display during a recording drops a clip that
 # has not yet the still frames of a page; the page is recorded again on return. The display no longer lights when
 # only the reading's number becomes known behind it.
-GLASSES_VIEW_CONTRACT_VERSION = "1.53.0"
+# 1.54.0 (glassdoc 0.44.22): the answers stand in the paper's order and carry no mark. An answer the two reads do
+# not settle is not shown at all (until now it came behind the others as ？label answer｜the other read's answer);
+# its capture is on the screen 再撮影. A double tap takes those captures only on that screen; on every other screen
+# of the answers it ends the writing as it did before captures were listed. A reading in which nothing has been
+# taken is left by a double tap (not in its first second and a half), where that double tap used to do nothing.
+# Pages the phone asks for again before sending are waited for one minute without a page or a gesture; then the
+# booklet goes out as it is.
+GLASSES_VIEW_CONTRACT_VERSION = "1.54.0"
 
 # Answer-area overlay payload (box + short answer; 2D image-anchored).
 # 1.1.0: added tracking metadata (tracking/fixed_ar/anchor_hint).

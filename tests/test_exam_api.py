@@ -53,9 +53,9 @@ def test_settings_distinguish_local_glasses_and_frozen_phone_controls(client):
     assert local["answers"]["writing_done"] == "one_double_tap_then_display_sleep"
     assert local["answers"]["writing_done_counts_toward_exit"] is False
     assert local["answers"]["exit"] == "two_more_double_taps_within_3_seconds_while_waiting"
-    assert local["answers"]["layout"] == "certain_then_retake_then_uncertain_then_seen"
+    assert local["answers"]["layout"] == "paper_order_then_retake_then_seen_without_unsettled"
     assert local["answers"]["next_previous"] == "swipe_past_the_last_screen_to_the_first"
-    assert local["answers"]["retake"] == "double_tap_while_captures_to_take_again_are_listed"
+    assert local["answers"]["retake"] == "double_tap_on_the_screen_that_lists_the_captures_to_take_again"
     assert local["answer_wake"] == "active_session_generation_and_new_answer_revision"
     assert local["physical_acceptance"] == "pending"
 

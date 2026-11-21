@@ -449,6 +449,25 @@ def _answered(result) -> bool:
     return isinstance(result, SolveResult) and result.extras.get("answer_status") == "ready"
 
 
+# What stands at the ends of a label and says nothing: "1." and "1", "(a)：" and "(a)".
+_LABEL_ENDS = ".,:;、。・"
+
+
+def _group_key(item) -> str:
+    """A question's group as two reads are lined up by it: its number when it has one ("1", "1.", "第1問" and
+    "【1】" are one group), else the group without the marks at its ends.
+
+    Phone, 2026-11-20: one read wrote the groups of a booklet's first seven major problems as "1" and the other as
+    "1."; fifteen questions came out twice, each marked as listed by one read only."""
+    group = _plain(item.get("group"))
+    number = re.search(r"\d+", group)
+    return number.group(0) if number else group.strip(_LABEL_ENDS)
+
+
+def _label_key(item) -> str:
+    return _plain(item.get("label")).strip(_LABEL_ENDS)
+
+
 _UNANSWERED = object()
 
 
@@ -465,7 +484,7 @@ def _slots(replies: list) -> list[list[tuple]]:
         boxes = [] if isinstance(numbers, list) and numbers else _boxes(item)
         bases = ([("number", str(number)) for number in numbers] if isinstance(numbers, list) and numbers
                  else [("box", _major(item), box) for box in boxes] if boxes
-                 else [("labels", _plain(item.get("group")), _plain(item.get("label")))])
+                 else [("labels", _group_key(item), _label_key(item))])
         keys = []
         for base in bases:
             seen[base] = seen.get(base, 0) + 1
@@ -515,6 +534,37 @@ def _between(first: list, second: list) -> None:
         if i < len(ours) and j < len(theirs) and ours[i] != theirs[j]:
             return  # the questions both name come in another order from here: no stretch can be told
         i, j = i + 1, j + 1
+
+
+def _same_answers(first: list, second: list, first_slots: list, second_slots: list) -> None:
+    """Questions the reads still name differently are one question where both reads gave the same short answer
+    from the same captures; the second read's question takes the first's slot. Taken in order, so that of two
+    questions with one answer on a page the earlier meets the earlier.
+
+    Whatever form the next difference of names takes (this is the net behind ``_group_key`` and ``_between``): two
+    reads that agree are not shown as two questions each listed by one read. What they do not agree on, and writing,
+    which is not compared, stay apart as before."""
+    ours, theirs = [tuple(keys) for keys in first_slots], [tuple(keys) for keys in second_slots]
+    common = set(ours) & set(theirs)
+
+    def open_marks(replies, slots):
+        found = []
+        for index, ((item, result), keys) in enumerate(zip(replies, slots)):
+            if keys in common or len(keys) != 1 or keys[0][0] != "labels" or not _answered(result):
+                continue
+            mark = _mark(result.answer)
+            if mark:
+                found.append((index, (tuple(sorted(map(str, item.get("pages") or []))), mark)))
+        return found
+
+    waiting = open_marks(second, theirs)
+    start = 0
+    for index, what in open_marks(first, ours):
+        for at in range(start, len(waiting)):
+            if waiting[at][1] == what:
+                second_slots[waiting[at][0]][:] = first_slots[index]
+                start = at + 1
+                break
 
 
 def _slot_marks(replies: list, slots: list) -> dict:
@@ -590,6 +640,7 @@ def _compared(first: list, second: list) -> list:
         _by_order(second, second_slots)
     else:
         _between(first_slots, second_slots)
+        _same_answers(first, second, first_slots, second_slots)
     mine, theirs = _slot_marks(first, first_slots), _slot_marks(second, second_slots)
     same_question = {tuple(keys): pair for keys, pair in zip(second_slots, second)}
     merged = []

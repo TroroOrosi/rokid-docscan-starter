@@ -481,7 +481,7 @@ class Check:
         self.committed = committed
         reached = self.row("every saved photo reached the server, in one new document", new_document and pages[0][0] >= committed,
                            f"{pages[0][0]} page(s) on the server for {committed} saved")
-        if reached and clip:
+        if reached and clip and not self.o.end_at_once:
             self.gathered(committed)
         return reached
 
@@ -494,6 +494,14 @@ class Check:
         mark = self.stamp()
         self.gesture(DOUBLE_TAP)
         time.sleep(4)
+        if self.o.end_at_once and self.o.capture == "clip":
+            # As a wearer ends it: right after the last page, with its clips still on their way. The phone's check
+            # then waits for them (60 to 83 s in the use of 2026-11-20) and answers when the display has long gone
+            # to sleep. Until 2026-11-21 this check always waited for the gathering before it ended the capture, so
+            # the phone's check answered at once: a camera the system refuses to sleeping glasses was never met here.
+            time.sleep(9)
+            self.row("ended at once: the display sleeps while the phone waits for the clips",
+                     "mWakefulness=Asleep" in self.sh("dumpsys power"))
         self.row("screen after the ending double tap", None, f"{self.lit('after-end')} lit pixels; "
                  + " | ".join(line[:60] for line in self.log(mark) if "preview_status" not in line and "page_change" not in line)[-3:][0:200])
         # Before anything is finalized the phone says which recorded pages are not whole (it waits for their clips
@@ -527,6 +535,8 @@ class Check:
                         + " | ".join(line[:70] for line in self.log(mark) if re.search("finish|Finish|analysis|REVIEW|ERROR|解析", line))[:260]):
             return False
         self.session = session[0][0]
+        if self.o.end_at_once and self.o.capture == "clip":
+            self.gathered(self.committed)
         pages = self.db(f"select page_index from pages where document_id = {session[0][2]} order by page_index")
         self.row("the document's pages are complete and in order", [p[0] for p in pages] == list(range(len(pages))) and len(pages) >= self.committed,
                  f"indexes {[p[0] for p in pages]}")
@@ -622,12 +632,25 @@ class Check:
         state = self.db("select count(*) from exam_sessions")[0][0]
         listed = self.api(f"/v1/exam-sessions/{self.session}/answer-bundle")[1]
         if listed.get("retake"):
-            # The answers end with captures to take again: a double tap takes them, and the booklet is read again.
+            # The answers are followed by one screen that lists the captures to take again. There a double tap takes
+            # them and the booklet is read again; on any other screen it ends the writing (from glassdoc 0.44.22: on
+            # 2026-11-20 it took them from every screen, and a wearer who meant to finish was put into the capture).
+            mark = self.stamp()
+            reached = None
+            for _ in range(8):
+                self.gesture(SWIPE_FORWARD)
+                time.sleep(1.2)
+                screens = [line for line in self.log(mark) if "reader screen=" in line]
+                if screens and screens[-1].rstrip().endswith("retake"):
+                    reached = screens[-1].split("reader ", 1)[1].strip()
+                    break
+            self.row("forward swipes reach the screen that lists the captures to take again", bool(reached), reached or "not in 8 swipes")
+            self.lit("retake-screen")
             mark = self.stamp()
             self.gesture(DOUBLE_TAP)
             back = self.wait_log(mark, "retake_shown", 10)
             time.sleep(2)
-            self.row("with captures to take again listed, a double tap on the answers brings the capture back",
+            self.row("on that screen a double tap brings the capture back",
                      bool(back) and self.lit("retake-from-answers") > 0, f"listed {listed['retake']}; " + (back or "no retake")[-60:])
             self.gesture(SWIPE_FORWARD)
             saved = self.wait_log(mark, "Photo committed locally", 75)
@@ -655,16 +678,22 @@ class Check:
                 else:
                     time.sleep(2)
             self.row("the glasses wake and show the new answers by themselves", bool(shown))
-            # Still listed (the stand-in answers as before): the retake is begun and left, which ends the writing.
+            # Captures are still listed (the stand-in answers as before, so nothing is new and the screen that lists
+            # them comes first). On a screen of answers a double tap ends the writing, with no retake begun.
+            mark = self.stamp()
+            for _ in range(4):
+                self.gesture(SWIPE_FORWARD)
+                time.sleep(1.2)
+                screens = [line for line in self.log(mark) if "reader screen=" in line]
+                if screens and not screens[-1].rstrip().endswith("retake"):
+                    break
             mark = self.stamp()
             self.gesture(DOUBLE_TAP)
-            self.wait_log(mark, "retake_shown", 10)
-            time.sleep(2.5)
-            self.gesture(DOUBLE_TAP)
-            left = self.wait_log(mark, "retake_left_ends_writing", 10)
+            done = self.wait_log(mark, "phase=writing_done", 10)
             time.sleep(6)
-            self.row("a second double tap before any page is taken ends the writing and the display goes off",
-                     bool(left) and self.lit("writing-done") == 0,
+            again = [line for line in self.log(mark) if "retake_shown" in line or "retake_from_answers" in line]
+            self.row("on another screen of the answers a double tap ends the writing and the display goes off",
+                     bool(done) and not again and self.lit("writing-done") == 0,
                      " | ".join(line[:70] for line in self.log(mark) if "preview_status" not in line)[-200:])
         else:
             mark = self.stamp()
@@ -697,6 +726,10 @@ def main() -> int:
     parser.add_argument("--clip-frames", type=int, default=0,
                         help="with --capture clip: still frames a clip gathers before it ends (60 to 250), this launch only; "
                              "250 makes the ten-second clips of about 140 MB a worn head makes")
+    parser.add_argument("--end-at-once", action="store_true",
+                        help="with --capture clip: end the capture right after the last page, as a wearer does, instead of "
+                             "waiting for the clips to be gathered first; the phone's check then answers after the display "
+                             "has gone to sleep")
     parser.add_argument("--watch-field", action="store_true",
                         help="with --capture clip: the watch preview takes the whole field, this launch only (register 2-59)")
     parser.add_argument("--record-field", action="store_true",
