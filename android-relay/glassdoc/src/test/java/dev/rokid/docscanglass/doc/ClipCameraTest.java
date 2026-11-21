@@ -127,6 +127,7 @@ public class ClipCameraTest {
     @Before public void setup() {
         ManagerShadow.devices.clear(); ReaderShadow.readers.clear();
         ManagerShadow.refuseSession = false; ManagerShadow.refuseOutputs = 0;
+        ManagerShadow.disabled = false; ManagerShadow.refusals = 0; ManagerShadow.refused.clear();
         MapShadow.previewSize = new Size(320, 240); MapShadow.fullSizeYuv = false;
         Context app = RuntimeEnvironment.getApplication();
         sensors = shadowOf((SensorManager) app.getSystemService(Context.SENSOR_SERVICE));
@@ -635,7 +636,7 @@ public class ClipCameraTest {
         assertEquals("the first six frames are not counted", 0, encoder.ends);
         clipFrames(1, 0); idle(0);
         assertEquals(66, encoder.offers); assertEquals(1, encoder.ends);
-        assertEquals("and only then", 0, sensors.getListeners().size());
+        assertEquals("and while the camera watches: its zero offset has to be known before a clip", 1, sensors.getListeners().size());
         clipFrames(3, 0);
         assertEquals("a frame after the end is not in the clip", 66, encoder.offers);
         assertEquals("but every frame is taken and returned", 69, clipImages.size());
@@ -866,7 +867,9 @@ public class ClipCameraTest {
         // watch session and whether it ran out; from the last frame to the file closed, the page's own files, and from
         // the file closed to the page handed over.
         assertTrue(line, line.matches("clip frames=66 counted=60 dropped=0 bytes=8 first_ms=\\d+ back_ms=\\d+ boost=500 exposure_ms=30 gyro=66 kept=true short=0"
-                + " open_ms=\\d+ idle_ms=\\d+ idle_timeout=false drain_ms=\\d+ page_ms=\\d+ closed_ms=\\d+"));
+                + " open_ms=\\d+ idle_ms=\\d+ idle_timeout=false drain_ms=\\d+ page_ms=\\d+ closed_ms=\\d+"
+                // and the gyroscope's zero offset taken out of the readings, in thousandths of a rad/s
+                + " offset=-?\\d+,-?\\d+,-?\\d+"));
     }
 
     @Test public void the_clips_line_says_that_the_watch_session_was_left_without_its_word() {
@@ -1187,11 +1190,149 @@ public class ClipCameraTest {
         assertEquals("it is not opened a fourth time by itself", 3, ManagerShadow.devices.size());
     }
 
+    private void asleep(boolean asleep) {
+        shadowOf((android.os.PowerManager) RuntimeEnvironment.getApplication().getSystemService(Context.POWER_SERVICE))
+                .setIsInteractive(!asleep);
+    }
+
+    @Test public void a_camera_refused_while_the_glasses_sleep_is_opened_once_they_are_awake() {
+        // 2026-11-20: the phone asked for two pages again 83 s after the capture's end. The glasses had gone to sleep
+        // 78 s before, the system refused the camera ("CAMERA_DISABLED (1): ... Camera "0" disabled by policy"), and
+        // the capture ended with "restart the app"; the wearer did, and the booklet went out with the two bad pages.
+        // The desk check had got its answer inside the five seconds before the display sleeps.
+        asleep(true);
+        ManagerShadow.disabled = true;
+        AtomicInteger ready = new AtomicInteger();
+        camera.awaitNextPage(ready::incrementAndGet); idle(100);
+        assertTrue("nothing has failed: " + failures, failures.isEmpty());
+        assertEquals(0, ManagerShadow.devices.size());
+        idle(30_000);
+        assertTrue("however long the glasses sleep: " + failures, failures.isEmpty());
+        assertTrue("it goes on asking, about once a second", ManagerShadow.refusals >= 20 && ManagerShadow.refusals <= 40);
+
+        asleep(false);
+        ManagerShadow.disabled = false;
+        idle(1_100);
+        assertEquals("opened as soon as the system lets it", 1, ManagerShadow.devices.size());
+        idleSession(0);
+        light(50_000_000L, 800, 423, CONTROL_AE_STATE_CONVERGED);
+        watchFrame(false); idle(400); watchFrame(false);
+        assertEquals("and the page in view is offered as ever", 1, ready.get());
+        assertTrue(failures.isEmpty());
+    }
+
+    @Test public void a_refused_camera_tidied_away_later_does_not_take_the_open_one_with_it() {
+        // Desk, 2026-11-21, the camera refused on purpose: it was opened once the refusal was lifted, recorded its
+        // first clip and never came back to watching ("no photo" after 60 s). Each refused attempt leaves a camera
+        // object that reports onClosed when the system finalizes it, seconds later ("a close after a startup error"),
+        // and that was taken for the open camera's end: its readers were closed under it, its gyroscope let go.
+        asleep(true);
+        ManagerShadow.disabled = true;
+        AtomicInteger ready = new AtomicInteger();
+        camera.awaitNextPage(ready::incrementAndGet); idle(3_500);
+        assertTrue("refused " + ManagerShadow.refused.size(), ManagerShadow.refused.size() >= 3);
+        asleep(false);
+        ManagerShadow.disabled = false;
+        idle(1_100);
+        assertEquals(1, ManagerShadow.devices.size());
+        idleSession(0);
+        for (ManagerShadow.Refused each : new ArrayList<>(ManagerShadow.refused)) each.state.onClosed(each.device);
+        idle(500);
+        assertEquals("the open camera keeps its gyroscope", 1, sensors.getListeners().size());
+        assertEquals("and is not opened anew", 1, ManagerShadow.devices.size());
+        light(50_000_000L, 800, 423, CONTROL_AE_STATE_CONVERGED);
+        watchFrame(false); idle(400); watchFrame(false);
+        assertEquals("and its watch frames still come", 1, ready.get());
+        assertTrue("" + failures, failures.isEmpty());
+    }
+
+    @Test public void a_camera_refused_with_the_display_on_fails_after_ten_seconds() {
+        asleep(false);
+        ManagerShadow.disabled = true;
+        camera.preview(); idle(100);
+        idle(9_000);
+        assertTrue("it may be the moment of waking: " + failures, failures.isEmpty());
+        idle(2_500);
+        assertEquals(1, failures.size());
+        assertTrue(failures.get(0), failures.get(0).contains("CAMERA_DISABLED"));
+        int asked = ManagerShadow.refusals;
+        idle(5_000);
+        assertEquals("and is not asked for again by itself", asked, ManagerShadow.refusals);
+    }
+
+    @Test public void a_camera_taken_away_under_a_capture_is_waited_for_too() {
+        // The same refusal reaches an open camera as error 3 (2026-11-20 10:02:29).
+        camera.preview(); idle(100); idleSession(0);
+        asleep(true);
+        ManagerShadow.disabled = true;
+        for (int i = 0; i < 5; i++) { // more often than a failing camera is opened again
+            DocScanTestCamera device = device();
+            device.state.onError(device, CameraDevice.StateCallback.ERROR_CAMERA_DISABLED); idle(3_000);
+        }
+        assertTrue("" + failures, failures.isEmpty());
+        asleep(false);
+        ManagerShadow.disabled = false;
+        idle(1_100);
+        assertEquals(2, ManagerShadow.devices.size());
+        assertTrue(failures.isEmpty());
+    }
+
     @Test public void frames_are_taken_and_returned_when_no_clip_is_recorded() {
         camera.preview(); idle(100);
         clipFrames(3, 0);
         assertEquals(3, clipImages.size()); assertEquals(0, encoder.offers);
-        assertEquals(0, sensors.getListeners().size());
+        assertEquals("watching, the gyroscope is listened to", 1, sensors.getListeners().size());
+        camera.close(); idle(2000);
+        assertEquals("and not once the camera is closed", 0, sensors.getListeners().size());
+    }
+
+    /** Readings of a head held still, 5 ms apart: the sensor's offset and a little spread around it. */
+    private void stillHead(int readings, float x, float y, float z) {
+        java.util.Random spread = new java.util.Random(11);
+        for (int i = 0; i < readings; i++) {
+            idle(5);
+            SensorEvent event = ShadowSensorManager.createSensorEvent(3);
+            event.timestamp = SystemClock.elapsedRealtimeNanos();
+            event.values[0] = x + (float) spread.nextGaussian() * 0.004f;
+            event.values[1] = y + (float) spread.nextGaussian() * 0.004f;
+            event.values[2] = z + (float) spread.nextGaussian() * 0.004f;
+            sensors.sendSensorEventToListeners(event);
+        }
+    }
+
+    @Test public void a_head_held_still_counts_although_the_gyroscope_reads_a_turn() throws Exception {
+        // 2026-11-20, worn, page 12 of a booklet: the gyroscope read +0.043 rad/s about y for the whole clip, which is
+        // 2.45 px of smear in 30 ms, the picture stood still, 4 of 296 frames counted and the page was recorded three
+        // times. The offset is followed while the camera watches and taken out of every reading.
+        watching();
+        stillHead(600, 0.002f, 0.043f, -0.008f);
+        recording();
+        ReaderShadow clip = reader(W);
+        var session = device().session;
+        for (int i = 0; i < 66; i++) {
+            idle(28);
+            long stamp = SystemClock.elapsedRealtimeNanos();
+            stillHead(1, 0.002f, 0.043f, -0.008f); // inside this frame's exposure
+            session.previewCallback.onCaptureCompleted(session, session.repeating,
+                    result(stamp, 30_000_000L, 800, 500, CONTROL_AE_STATE_INACTIVE));
+            DocScanTestImage image = new DocScanTestImage(clipImages);
+            image.format = ImageFormat.YUV_420_888; image.width = W; image.height = H;
+            image.rowStride = ROW; image.pixelStride = 1;
+            image.timestamp = stamp; image.buffer = ByteBuffer.wrap(new byte[ROW * H]);
+            clip.image = image; clip.listener.onImageAvailable(clip.reader);
+        }
+        idle(0);
+        assertEquals("sixty frames counted of the sixty-six: the clip ended by itself", 1, encoder.ends);
+        idleSession(1); idle(100); watchFrame(false);
+        assertEquals(1, pages.size());
+        JSONObject record = record(pages.get(0).provenance.captureId);
+        JSONArray offset = record.getJSONArray("gyro_offset");
+        // Three seconds of watching: one bounded step (0.02 rad/s) and what the seconds since add. On the glasses
+        // the offset had been followed since the booklet's second page.
+        assertEquals("the offset taken out is in the record beside the readings as they came", 0.024, offset.getDouble(1), 0.004);
+        assertEquals(0.043, record.getJSONObject("gyro").getJSONArray("y").getDouble(0), 0.02);
+        double smear = record.getJSONArray("frames").getJSONObject(30).getDouble("smear_px");
+        assertTrue("a frame's smear is the corrected one, under the 2 px a still frame may have: " + smear, smear < 2.0);
     }
 
     /** The counts reported while recording, without the report that ends it. */

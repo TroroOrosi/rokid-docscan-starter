@@ -2028,9 +2028,30 @@ public class GlassCameraWarmSessionTest {
         static final List<DocScanTestCamera> devices = new ArrayList<>();
         static boolean refuseSession;
         static int refuseOutputs;
+        /** The system does not let this app use the camera: what a sleeping pair of glasses answers (2026-11-20). */
+        public static boolean disabled;
+        public static int refusals;
+        /** A refused attempt: its callback and the camera object the system made for it and never opened. */
+        public static final class Refused {
+            public final CameraDevice.StateCallback state; public final CameraDevice device;
+            Refused(CameraDevice.StateCallback state, CameraDevice device) { this.state = state; this.device = device; }
+        }
+        public static final List<Refused> refused = new ArrayList<>();
         @Implementation protected String[] getCameraIdList() { return new String[]{"0"}; }
         @Implementation protected CameraCharacteristics getCameraCharacteristics(String id) { return Shadow.newInstanceOf(CameraCharacteristics.class); }
-        @Implementation protected void openCamera(String id, CameraDevice.StateCallback callback, Handler h) {
+        @Implementation protected void openCamera(String id, CameraDevice.StateCallback callback, Handler h)
+                throws android.hardware.camera2.CameraAccessException {
+            if (disabled) {
+                refusals++;
+                // As CameraManager does for this refusal: the error is also reported to the callback, for a camera
+                // object that is never opened, and the exception is thrown ("these failures call onError and throw").
+                // That object reports onClosed when it is finalized; a test delivers it from `refused`.
+                DocScanTestCamera never = new DocScanTestCamera(template -> Shadow.newInstanceOf(CaptureRequest.Builder.class));
+                refused.add(new Refused(callback, never));
+                h.post(() -> callback.onError(never, CameraDevice.StateCallback.ERROR_CAMERA_DISABLED));
+                throw new android.hardware.camera2.CameraAccessException(
+                        android.hardware.camera2.CameraAccessException.CAMERA_DISABLED, "Camera \"0\" disabled by policy");
+            }
             DocScanTestCamera device = new DocScanTestCamera(template -> {
                 CaptureRequest.Builder b = Shadow.newInstanceOf(CaptureRequest.Builder.class);
                 ((BuilderShadow)Shadow.extract(b)).template = template; return b;

@@ -15,7 +15,21 @@ final class PageChange {
     private long changedAt;
     private boolean pending = true;
     private long sequence;
-    private LumaPageEvidence fine = new LumaPageEvidence();
+    /** The clock the fine search's time limits run on: the processor's own, except in tests. */
+    private final java.util.function.LongSupplier nanos;
+    private LumaPageEvidence fine;
+
+    PageChange() { this(System::nanoTime); }
+
+    /**
+     * With a clock of the caller's. The fine search gives up when it has taken too long (LumaPageEvidence), and on a
+     * loaded machine it did in the middle of a test: PageChangeLumaTest failed twice beside another test run
+     * (2026-11-19, 2026-11-21) and passed alone.
+     */
+    PageChange(java.util.function.LongSupplier nanos) {
+        this.nanos = nanos;
+        fine = new LumaPageEvidence(nanos);
+    }
     private long lastFrameTimestamp, lastFrameAt;
     private String lastCause = "none";
     private int lastOffset, lastShare;
@@ -192,7 +206,7 @@ final class PageChange {
     boolean fineMotionReady(long now) { return fine.motionReady(now); }
     String fineStatus() { return fine.status(); }
     void restartStream() {
-        fine = new LumaPageEvidence(); lastFrameTimestamp = lastFrameAt = 0;
+        fine = new LumaPageEvidence(nanos); lastFrameTimestamp = lastFrameAt = 0;
     }
     long sequence() { return sequence; }
 }

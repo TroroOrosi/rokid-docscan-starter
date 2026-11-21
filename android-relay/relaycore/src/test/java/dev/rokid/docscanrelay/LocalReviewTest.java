@@ -2750,6 +2750,38 @@ public class LocalReviewTest {
      * requested, with the camera stopped and automatic capture off; after that the tap, the forward swipe and every
      * further double tap did nothing, and nothing was drawn. The end is not taken and the capture goes on.
      */
+    @Test public void aReadingSaysWhetherAnythingHasBeenTakenInIt() throws Exception {
+        // The display asks, to let a double tap leave a reading that holds nothing (the activity's part). On
+        // 2026-11-20 such a double tap was "not taken as the end" fourteen times in seventeen seconds, and the
+        // wearer folded the glasses to get out.
+        Surface surface = new Surface(); surface.holdForPage = true;
+        DocScanController controller = new DocScanController(RuntimeEnvironment.getApplication(), surface, null,
+                (state, lines, diagnostic) -> {}, new ClientIdentity("test", "test", "test"));
+        try {
+            assertFalse("no reading", controller.nothingTakenYet());
+            controller.configureForLocalStart("http://phone:8000", "", 270);
+            controller.startLocalSession(false); barrier(controller);
+            assertTrue("a reading that waits for its first page", controller.nothingTakenYet());
+            Runnable ready = surface.pageReady;
+            surface.pageReady = null;
+            ready.run(); barrier(controller);
+            assertTrue("a page is aimed at, none is being taken yet", controller.nothingTakenYet());
+            controller.close();
+            assertFalse(controller.nothingTakenYet());
+        } finally { controller.close(); }
+    }
+
+    @Test public void aReadingThatHoldsAPageIsNotOneInWhichNothingWasTaken() throws Exception {
+        DocScanController controller = takenUpAgainAtAPageThatCanOnlyBeRetaken(0, new Surface());
+        try {
+            assertFalse("a page waits for its review", controller.nothingTakenYet());
+        } finally { controller.close(); }
+        controller = takenUpAgainAtAPageThatCanOnlyBeRetaken(2, new Surface());
+        try {
+            assertFalse(controller.nothingTakenYet());
+        } finally { controller.close(); }
+    }
+
     @Test public void aDoubleTapBeforeAnyPageIsSavedLeavesTheCaptureRunning() throws Exception {
         Surface surface = new Surface(); surface.holdForPage = true;
         DocScanController controller = new DocScanController(RuntimeEnvironment.getApplication(), surface, null,

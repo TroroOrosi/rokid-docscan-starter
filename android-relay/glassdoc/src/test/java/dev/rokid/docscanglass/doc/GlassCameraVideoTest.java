@@ -309,7 +309,8 @@ public class GlassCameraVideoTest {
     }
     @Implements(CameraManager.class) public static class ManagerShadow extends GlassCameraWarmSessionTest.ManagerShadow {
         static boolean exactSupported, queryUnavailable;
-        @Implementation protected void openCamera(String id, CameraDevice.StateCallback callback, Handler h) {
+        @Implementation protected void openCamera(String id, CameraDevice.StateCallback callback, Handler h)
+                throws android.hardware.camera2.CameraAccessException {
             super.openCamera(id, callback, h);
             DocScanTestCamera opened = devices.get(devices.size()-1);
             opened.supportsExactSession = exactSupported; opened.sessionQueryUnsupported = queryUnavailable;

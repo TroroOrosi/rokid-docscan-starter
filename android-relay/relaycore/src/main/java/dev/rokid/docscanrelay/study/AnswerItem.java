@@ -27,6 +27,12 @@ public final class AnswerItem {
     public final String other;
     /** The wearer already had this exact answer before pages were added. */
     public final boolean seen;
+    /**
+     * The two reads of the booklet do not settle this answer: they differ, or one of them alone gave it. The reader
+     * shows no such answer; the bundle lists its capture among those to take again. The server marks it
+     * ({@code uncertain}); a bundle from a server before that mark is told by its note, which begins with 2回.
+     */
+    public final boolean uncertain;
 
     public AnswerItem(String groupId, String groupLabel, String questionId, String questionLabel,
                       String answer, Status status, String issue) {
@@ -47,6 +53,12 @@ public final class AnswerItem {
     public AnswerItem(String groupId, String groupLabel, String questionId, String questionLabel,
                       String answer, Status status, String issue, List<AnswerDiagram> diagrams,
                       List<Integer> answerNumbers, String other, boolean seen) {
+        this(groupId, groupLabel, questionId, questionLabel, answer, status, issue, diagrams, answerNumbers, other, seen, false);
+    }
+
+    public AnswerItem(String groupId, String groupLabel, String questionId, String questionLabel,
+                      String answer, Status status, String issue, List<AnswerDiagram> diagrams,
+                      List<Integer> answerNumbers, String other, boolean seen, boolean uncertain) {
         this.groupId = identifier(groupId);
         this.questionId = identifier(questionId);
         this.groupLabel = label(groupLabel);
@@ -66,6 +78,7 @@ public final class AnswerItem {
         this.issue = status == Status.READY ? "" : issue;
         this.other = status == Status.NEEDS_REVIEW ? other : "";
         this.seen = seen;
+        this.uncertain = status == Status.NEEDS_REVIEW && (uncertain || issue.startsWith("2回"));
         this.diagrams = Collections.unmodifiableList(new ArrayList<>(diagrams));
         if (answerNumbers == null || answerNumbers.size() > 1000 || answerNumbers.stream()
                 .anyMatch(n -> n == null || n <= 0 || n > 9999)) throw new IllegalArgumentException("invalid answer number");

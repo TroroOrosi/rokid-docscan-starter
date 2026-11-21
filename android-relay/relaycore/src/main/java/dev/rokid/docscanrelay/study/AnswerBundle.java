@@ -145,6 +145,7 @@ public final class AnswerBundle {
                     .name("question_id").value(item.questionId).name("question_label").value(item.questionLabel)
                     .name("answer").value(item.answer).name("status").value(item.status.name().toLowerCase(Locale.ROOT))
                     .name("issue").value(item.issue).name("other").value(item.other).name("seen").value(item.seen)
+                    .name("uncertain").value(item.uncertain)
                     .name("diagrams");
             AnswerJson.writeValue(writer, AnswerDiagram.encode(item.diagrams));
             writer.name("answer_no").beginArray();
@@ -215,7 +216,8 @@ public final class AnswerBundle {
                                 AnswerItem.Status.valueOf(string(item, "status").toUpperCase(Locale.ROOT)),
                                 string(item, "issue"), AnswerDiagram.parse(item.has("diagrams")
                                         ? item.getJSONArray("diagrams") : null), answerNumbers(item),
-                                item.has("other") ? string(item, "other") : "", item.has("seen") && flag(item, "seen"));
+                                item.has("other") ? string(item, "other") : "", item.has("seen") && flag(item, "seen"),
+                                item.has("uncertain") && flag(item, "uncertain"));
                         characters += answer.answer.length() + answer.issue.length();
                         if (characters > MAX_TEXT_CHARS) throw new IOException("answer text too large");
                         items.add(answer);

@@ -817,7 +817,11 @@ public final class DocScanGlassActivity extends Activity
                     backExit.reset();
                     answers.refresh();
                 } else {
-                    if (startRetakeFromAnswers(elapsedMillis)) return;
+                    // On the screen that lists the captures to take again the double tap takes them; on every other
+                    // screen it ends the writing as it always did. Until 2026-11-21 it took them from any screen: on
+                    // 2026-11-20 the wearer, done with the answers, double-tapped to finish, was put into the capture
+                    // twice and needed eight double taps to get out.
+                    if (reader.onRetakeScreen() && startRetakeFromAnswers(elapsedMillis)) return;
                     boolean interim = reader.bundle().intermediate();
                     if (!closeAnswers(!interim)) return;
                     if (interim) {
@@ -836,6 +840,10 @@ public final class DocScanGlassActivity extends Activity
                 closeAnswers();
                 return;
             }
+            // Which screen the wearer is on, in numbers: on 2026-11-20 a double tap on the answers started a retake
+            // and nothing on record said where in the answers it was made.
+            UseLog.i(TAG, "reader screen=" + reader.pageNumber() + "/" + reader.pageCount()
+                    + (reader.onRetakeScreen() ? " retake" : ""));
             persistAnswerPosition(false);
             answers.refresh();
             return;
@@ -909,6 +917,17 @@ public final class DocScanGlassActivity extends Activity
             // Waiting for the answers there is nothing to capture: a tap turns the display off as on every screen,
             // and no gesture reaches the capture controller (a forward swipe used to arrive there as a tap).
             if (action == GlassesInputAction.SHORT_TAP) sleepDisplayNow();
+            return;
+        }
+        // A reading in which nothing has been taken has nothing to end: the double tap leaves it, as two double taps
+        // leave the app once the writing is done. Until 2026-11-21 that double tap was "not taken" and the capture
+        // went on: on 2026-11-20 the wearer double-tapped fourteen times in seventeen seconds and then folded the
+        // glasses to get out. Not in the reading's first second and a half: the double tap that starts it comes twice.
+        if (action == GlassesInputAction.BACK && !mixedMode && !listeningMode && !controller.isCapturePaused()
+                && readingStartedAtMillis >= 0 && elapsedMillis - readingStartedAtMillis >= EMPTY_LEAVE_GRACE_MILLIS
+                && controller.nothingTakenYet()) {
+            UseLog.i(TAG, "reading_left_empty");
+            exitSession();
             return;
         }
         if (!mixedMode && !listeningMode) {
@@ -1085,6 +1104,7 @@ public final class DocScanGlassActivity extends Activity
                 return;
             }
             UseLog.i(TAG, "reading_start free_mb=" + (freeBytes.getAsLong() >> 20) + " resumed=" + (startupCaptures != null));
+            readingStartedAtMillis = SystemClock.elapsedRealtime();
             beginPowerGeneration();
             choosingSession = false;
             startupAnswers = null;
@@ -1683,6 +1703,10 @@ public final class DocScanGlassActivity extends Activity
 
     /** A double tap made again this soon after the one that began a retake is that same double tap. */
     private static final long RETAKE_GRACE_MILLIS = 1500;
+    /** A double tap this soon after a reading began is the start's own, made twice. */
+    static final long EMPTY_LEAVE_GRACE_MILLIS = 1500;
+    /** When the reading in hand began or was taken up (elapsed realtime); -1 with none. */
+    private long readingStartedAtMillis = -1;
     private long retakeAskedAtMillis = -1;
 
     /**

@@ -27,9 +27,11 @@ public final class AnswerReader {
     private final boolean continuous;
     private final List<ContinuousSection> sections = new ArrayList<>();
     private int continuousPageCount;
-    // Continuous reading shows the questions in an order of its own: the certain answers, the screen that says
-    // what to photograph again, what is not certain, the answers the wearer already had. The bundle's order stays
-    // the questions' identity; these say where each one is shown.
+    // Continuous reading shows the answers in the paper's order, which is the bundle's; then the screen that says
+    // what to photograph again; then what has no answer yet (being analysed, failed); then, after pages were added,
+    // the answers the wearer already had. A question that cannot be answered, or that the two reads do not settle,
+    // is not shown: its capture is on the retake screen (the operator, 2026-11-19 and 2026-11-21). The bundle's
+    // order stays the questions' identity; these say where each one is shown.
     private static final String RETAKE = "再撮影";
     /** Bundle index to place in the display order; -1 for a question that is not shown. */
     private int[] entryOf;
@@ -59,10 +61,11 @@ public final class AnswerReader {
         firstScreen();
     }
 
-    /** 0 certain, 2 not certain, 3 already had; -1 not shown: a notice, or a question whose pages are to be retaken. */
+    /** 0 an answer, 2 no answer yet, 3 already had; -1 not shown: a notice, or a question whose pages are to be retaken. */
     private static int part(AnswerItem item) {
-        if (item.notice() || item.status == AnswerItem.Status.NEEDS_INPUT) return -1;
-        if (item.status != AnswerItem.Status.READY) return 2;
+        if (item.notice() || item.status == AnswerItem.Status.NEEDS_INPUT || item.uncertain) return -1;
+        // An answer to check for its form alone (a table the display cannot carry) is an answer, shown as it is.
+        if (item.status != AnswerItem.Status.READY && item.status != AnswerItem.Status.NEEDS_REVIEW) return 2;
         return item.seen ? 3 : 0;
     }
 
@@ -120,6 +123,8 @@ public final class AnswerReader {
     public AnswerItem current() { return bundle.items.get(questionIndex); }
     /** Capture pages (1-based) the wearer should photograph again. */
     public List<Integer> retakePages() { return bundle.retake; }
+    /** The reader stands on the screen that lists them: there a double tap takes them, elsewhere it ends the writing. */
+    public boolean onRetakeScreen() { return continuous && onRetake && !bundle.retake.isEmpty(); }
     /** A second read is still being compared with these answers. */
     public boolean comparing() { return bundle.comparing; }
     /** What the index row names: the question at the top of the screen, or the screen that belongs to none. */
@@ -202,12 +207,12 @@ public final class AnswerReader {
         String content;
         switch (item.status) {
             case READY: content = item.answer; break;
-            // Continuous reading marks the row with ？ and gives the other read's answer, with no sentence
-            // (operator, 2026-11-19). The reader with menus, which no screen of the app uses, warns first so
-            // the operator knows the answer is incomplete before copying it, and the answer still follows.
+            // Continuous reading shows the answer alone, with no mark and no sentence (operator, 2026-11-19 and
+            // 2026-11-21); what the two reads do not settle never comes here (part). The reader with menus, which
+            // no screen of the app uses, warns first so the operator knows the answer is incomplete before copying
+            // it, and the answer still follows.
             case NEEDS_REVIEW:
-                content = !continuous ? "【要確認】" + item.issue + "\n" + item.answer
-                        : item.other.trim().isEmpty() ? item.answer : item.answer + "｜" + item.other;
+                content = !continuous ? "【要確認】" + item.issue + "\n" + item.answer : item.answer;
                 break;
             // Not shown in continuous reading: its pages are on the retake screen.
             case NEEDS_INPUT: content = "資料不足\n" + item.issue; break;
@@ -246,7 +251,7 @@ public final class AnswerReader {
             for (int entry = first; !pseudo && entry <= last; entry++) {
                 AnswerItem item = bundle.items.get(questionOf[entry]);
                 String body = content(item);
-                String label = (item.status == AnswerItem.Status.NEEDS_REVIEW ? "？" : "") + item.readingLabel();
+                String label = item.readingLabel();
                 boolean compact = item.status == AnswerItem.Status.READY && item.diagrams.isEmpty()
                         && !body.contains("\n") && !body.contains("\r");
                 String row = compact ? label + " " + body : "";

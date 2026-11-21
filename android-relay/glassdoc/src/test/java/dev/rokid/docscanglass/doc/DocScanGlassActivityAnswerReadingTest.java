@@ -909,6 +909,31 @@ public class DocScanGlassActivityAnswerReadingTest {
                 backExit().isArmed());
     }
 
+    @Test
+    public void aDoubleTapInAReadingWithNothingTakenLeavesItButNotInItsFirstMoment() throws Exception {
+        // 2026-11-20 10:02: a reading was started, nothing was taken, and the double tap that should have got the
+        // wearer out was "not taken as the end" fourteen times in seventeen seconds; they folded the glasses.
+        controller.close();
+        controller = new DocScanController(activity, new LocalReviewSurface(), null, activity,
+                new ClientIdentity("test-glasses", "answer-test/1", "fake-camera"));
+        setField(activity, "controller", controller);
+        controller.configureForLocalStart(server.url("/").toString(), "test-key", 180);
+        controllerBarrier();
+        controller.startLocalSession(false);
+        controllerBarrier();
+        Shadows.shadowOf(Looper.getMainLooper()).idle();
+        assertTrue(controller.nothingTakenYet());
+        setField(activity, "readingStartedAtMillis", 10_000L);
+
+        invokeOnAction(GlassesInputAction.BACK, 11_000);
+        controllerBarrier();
+        assertFalse("the double tap that started the reading, made twice", activity.isFinishing());
+
+        invokeOnAction(GlassesInputAction.BACK, 12_000);
+        assertTrue("there is nothing to end: the reading is left", activity.isFinishing());
+        assertFalse(controller.nothingTakenYet());
+    }
+
     /**
      * Minor 2: a fetch or resume that completes after the two-stage exit
      * already finished the Activity must not touch its screen.

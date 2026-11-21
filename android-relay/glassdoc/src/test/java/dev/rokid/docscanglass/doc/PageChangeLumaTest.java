@@ -24,7 +24,7 @@ public class PageChangeLumaTest {
         page.observeFrame(coarse(p), ByteBuffer.wrap(p), 320, 240, 320, 1, (now+1)*1_000_000L, now);
     }
     private PageChange consumed(byte[] p) {
-        PageChange page=new PageChange(); frame(page,p,0);frame(page,p,400);
+        PageChange page=new PageChange(() -> 0L); frame(page,p,0);frame(page,p,400);
         assertTrue(page.ready(400)); assertTrue(page.fineMotionReady(400));page.consumed();return page;
     }
     static byte[] shift(byte[] p,int dx,int dy) {
@@ -76,7 +76,7 @@ public class PageChangeLumaTest {
         byte[] a=new byte[320*240];Arrays.fill(a,(byte)220);PageChange p=consumed(a);
         byte[] b=a.clone();Arrays.fill(b,80*320,120*320,(byte)160);frame(p,b,1000);frame(p,b,1400);
         assertTrue(p.ready(1400));p.consumed();frame(p,b,2000);assertFalse(p.ready(2000));
-        PageChange drift=new PageChange();frame(drift,a,0);
+        PageChange drift=new PageChange(() -> 0L);frame(drift,a,0);
         for(int y=0;y<240;y++)Arrays.fill(a,y*320,y*320+20,(byte)160);
         frame(drift,a,400);drift.consumed();long scene=drift.sequence();
         for(int y=0;y<240;y++)Arrays.fill(a,y*320+20,y*320+40,(byte)160);
@@ -180,7 +180,7 @@ public class PageChangeLumaTest {
         for (int y = 0; y < 480; y++) for (int x = 0; x < 640; x++)
             jitter[y * 640 + x] = a[Math.min(479, y + 1) * 640 + Math.min(639, x + 1)];
         for (int i = 0; i < gain.length; i++) gain[i] = (byte)((a[i] & 255) + 15);
-        PageChange page = new PageChange(); frame640(page, a, 0); frame640(page, a, 400); page.consumed();
+        PageChange page = new PageChange(() -> 0L); frame640(page, a, 0); frame640(page, a, 400); page.consumed();
         long scene = page.sequence(); frame640(page, jitter, 1000);
         assertEquals(scene, page.sequence()); assertFalse(page.fineMotionReady(1000));
         frame640(page, jitter, 1400); assertTrue(page.fineMotionReady(1400));
@@ -218,7 +218,7 @@ public class PageChangeLumaTest {
         return p;
     }
     private static PageChange controlledPage(java.util.function.LongSupplier nanos) throws Exception {
-        PageChange page = new PageChange();
+        PageChange page = new PageChange(() -> 0L);
         java.lang.reflect.Field fine = PageChange.class.getDeclaredField("fine"); fine.setAccessible(true);
         fine.set(page, new LumaPageEvidence(nanos)); return page;
     }

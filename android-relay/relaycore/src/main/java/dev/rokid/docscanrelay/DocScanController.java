@@ -519,6 +519,7 @@ public final class DocScanController implements AutoCloseable {
         }
         try {
             serial.execute(() -> {
+                if (retaking && !retakeFromAnswers) awaitRetake(); // a gesture: the wearer is there
                 if (link.supportsLocalCaptureReview() && state != RelayState.REVIEW) {
                     if (action == GlassesInputAction.BACK) {
                         finishLocalCaptureNow();
@@ -1009,6 +1010,47 @@ public final class DocScanController implements AutoCloseable {
     /** Whether pages the phone asked for are still to be taken again: their numbers stay on the display meanwhile. */
     public boolean isRetaking() { return retaking; }
 
+    /**
+     * How long pages the phone asked for are waited for while nothing is taken and no gesture is made. The phone asks
+     * once the clips are gathered, a minute or more after the end (83 s on 2026-11-20), when the display is dark and
+     * the wearer waits for answers: nobody may be looking. Then the booklet goes out as it is, and the answers list
+     * those captures to take again.
+     */
+    static final long RETAKE_WAIT_MILLIS = 60_000;
+    private long retakeWait;
+
+    /** The minute begins anew: when the pages are asked for, with every gesture and with every page taken again. */
+    private void awaitRetake() {
+        long token = ++retakeWait;
+        watchdog.schedule(() -> {
+            try { serial.execute(() -> retakeWaitedOut(token)); } catch (RejectedExecutionException ignored) { }
+        }, RETAKE_WAIT_MILLIS, TimeUnit.MILLISECONDS);
+    }
+
+    private void retakeWaitedOut(long token) {
+        if (token != retakeWait || closed || !retaking || retakeFromAnswers) return;
+        if (capturePaused || state.isCaptureInProgress() || state == RelayState.AIMING || state == RelayState.STABILIZING
+                || captureReview.hasPending() || captureLease.isUnresolved()) {
+            awaitRetake(); // the wearer is at it, or has cleared the display on purpose
+            return;
+        }
+        UseLog.i(LOG, "retake_unanswered pages=" + retakeNumbers());
+        finishLocalCaptureNow();
+    }
+
+    /**
+     * An ordinary written reading that holds no page, with none under review and none being taken: there is nothing
+     * to end, so the display lets a double tap leave it. Read from the display's thread.
+     */
+    public boolean nothingTakenYet() {
+        LocalCaptureSession saved = localSession;
+        RelayState now = state;
+        return !closed && saved != null && !listeningMode && !mixedMode && !retaking && saved.pageCount() == 0
+                && (now == RelayState.READY || now == RelayState.READING || now == RelayState.AIMING
+                        || now == RelayState.STABILIZING)
+                && !captureReview.hasPending() && !captureLease.isUnresolved();
+    }
+
     /** The pages (indexes) the phone found not whole are taken again in place; see {@link #retakeQueue}. */
     void retakePages(List<Integer> pageIndexes) {
         List<Integer> asked = new ArrayList<>(pageIndexes);
@@ -1043,6 +1085,7 @@ public final class DocScanController implements AutoCloseable {
         link.passOverViewInHand();
         if (autoCaptureEnabled) { autoRunGeneration++; waitForNextPage(); }
         else startAutoCaptureNow();
+        if (!retakeFromAnswers) awaitRetake();
     }
 
     /**
@@ -2371,6 +2414,7 @@ public final class DocScanController implements AutoCloseable {
             retakeQueue.pollFirst();
             retakeTouched = true;
             UseLog.i(LOG, "retake_saved index=" + pending.pageIndex + " left=" + retakeQueue.size());
+            if (!retakeFromAnswers && !retakeQueue.isEmpty()) awaitRetake();
             if (retakeQueue.isEmpty()) {
                 // The last page asked for is in: the booklet goes out, as after the wearer's own double tap.
                 retaking = false;

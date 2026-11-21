@@ -162,11 +162,13 @@ public class AnswerReaderRevisionTest {
         return new AnswerItem("g", "Group", "target", "Target", answer, status, issue, List.of(), List.of(), other, seen);
     }
 
-    @Test public void otherReadOnlyChangeInAnyContinuousItemReflows() {
+    @Test public void anAnswerToCheckForItsFormIsShownAsItIsWithoutAMark() {
+        // A table or a figure the display cannot carry: the answer is there, plain. What the two reads do not
+        // settle is another matter and is not shown (ContinuousAnswerReaderTest).
         assertChangedItemReflowsAtEveryPosition(
-                target("same answer", AnswerItem.Status.NEEDS_REVIEW, "check", "old other", false),
-                target("same answer", AnswerItem.Status.NEEDS_REVIEW, "check", "new other", false),
-                "？Group Target same answer｜new other");
+                target("old answer", AnswerItem.Status.NEEDS_REVIEW, "表示できない要素: 表", "", false),
+                target("new answer", AnswerItem.Status.NEEDS_REVIEW, "表示できない要素: 表", "", false),
+                "Group Target new answer");
     }
 
     @Test public void seenOnlyChangeInAnyContinuousItemReflows() {

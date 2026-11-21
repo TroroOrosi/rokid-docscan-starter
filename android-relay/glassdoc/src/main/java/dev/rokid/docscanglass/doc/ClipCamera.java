@@ -169,6 +169,12 @@ final class ClipCamera implements PageCamera {
      * failed this many times with no page between: then the capture fails, as every other failure does at once.
      */
     static final int MAX_CAMERA_FAILURES = 3;
+    /**
+     * The system refuses the camera to an app whose display is off or that is not in front (CAMERA_DISABLED, "disabled
+     * by policy"; error 3 on a camera already open). That is no fault of the camera: it is asked for again once a
+     * second for as long as the glasses sleep, and for this long once they are awake.
+     */
+    static final long REFUSED_RETRY_MILLIS = 1_000, REFUSED_AWAKE_MILLIS = 10_000;
     /** The third clip in a row that runs out its time short of still frames is taken as the page it is. */
     static final int SHORT_CLIPS_TAKEN = 3;
     private static final int MAX_FRAMES = (int) (MAX_MILLIS / 1000) * FPS + FPS;
@@ -226,11 +232,17 @@ final class ClipCamera implements PageCamera {
     private final SensorManager sensors;
     private final Sensor gyroscope;
     private final HeadMotion.Ring turning = new HeadMotion.Ring(512);
+    /**
+     * The sensor's zero offset, followed for as long as the camera is open (watching too, so that it is known before
+     * the first clip) and taken out of what a frame's smear is worked out from. The clip's record keeps the readings
+     * as they came, and the offset beside them.
+     */
+    private final GyroBias offset = new GyroBias();
     private final SensorEventListener turningListener = new SensorEventListener() {
         @Override public void onSensorChanged(SensorEvent event) {
             if (event.values.length < 3) return;
             float x = event.values[0], y = event.values[1], z = event.values[2];
-            turning.add(event.timestamp, (float) Math.sqrt(x * x + y * y + z * z));
+            turning.add(event.timestamp, offset.add(event.timestamp, x, y, z));
             synchronized (lock) { // the frames' thread, under the lock, as the frames themselves
                 Clip into = recording;
                 if (into != null && into.readings < MAX_READINGS) {
@@ -334,6 +346,40 @@ final class ClipCamera implements PageCamera {
         this.options = options;
         sensors = (SensorManager) context.getSystemService(Context.SENSOR_SERVICE);
         gyroscope = sensors == null ? null : sensors.getDefaultSensor(Sensor.TYPE_GYROSCOPE);
+        power = (android.os.PowerManager) context.getSystemService(Context.POWER_SERVICE);
+    }
+
+    private final android.os.PowerManager power;
+    /** When the camera was first refused with the display on; 0 while it is not refused or the glasses sleep. */
+    private long refusedAwakeSince;
+    private boolean refused;
+    private final Runnable askAgain = () -> {
+        if (!closed) step();
+    };
+
+    /**
+     * The camera was refused, not broken. True: it is asked for again in a second, and nothing is told to the capture,
+     * which keeps what it was waiting for. False once it has been refused for REFUSED_AWAKE_MILLIS with the display
+     * on: then something else holds it, and the capture fails as before.
+     *
+     * <p>2026-11-20: the phone asked for two pages again 83 s after the end of a capture. The glasses had been asleep
+     * for 78 s, the open was refused, and the capture ended with "restart the app".</p>
+     */
+    private boolean waitRefused(String what) {
+        long now = SystemClock.elapsedRealtime();
+        boolean awake = power == null || power.isInteractive();
+        if (!awake) refusedAwakeSince = 0;
+        else if (refusedAwakeSince == 0) refusedAwakeSince = now;
+        else if (now - refusedAwakeSince >= REFUSED_AWAKE_MILLIS) {
+            refusedAwakeSince = 0;
+            refused = false;
+            return false;
+        }
+        if (!refused) UseLog.w(TAG, "clip camera refused, waiting: " + what + " awake=" + awake);
+        refused = true;
+        handler.removeCallbacks(askAgain);
+        handler.postDelayed(askAgain, REFUSED_RETRY_MILLIS);
+        return true;
     }
 
     void marks(Marks shown) { marks = shown; }
@@ -549,6 +595,7 @@ final class ClipCamera implements PageCamera {
             framesThread = new HandlerThread("clip-frames");
             framesThread.start();
             frames = new Handler(framesThread.getLooper());
+            if (gyroscope != null) sensors.registerListener(turningListener, gyroscope, HeadMotion.PERIOD_MICROS, frames);
             synchronized (lock) {
                 watchPending = false;
                 watchReader = ImageReader.newInstance(size.getWidth(), size.getHeight(), ImageFormat.YUV_420_888, 2);
@@ -569,14 +616,27 @@ final class ClipCamera implements PageCamera {
                     }
                     opening = false;
                     device = opened;
+                    if (refused) UseLog.i(TAG, "clip camera opened after being refused");
+                    refused = false;
+                    refusedAwakeSince = 0;
                     step();
                 }
 
                 @Override public void onDisconnected(CameraDevice gone) { lost(gone, "camera disconnected"); }
 
-                @Override public void onError(CameraDevice gone, int error) { lost(gone, "camera error " + error); }
+                @Override public void onError(CameraDevice gone, int error) {
+                    taken = error == CameraDevice.StateCallback.ERROR_CAMERA_DISABLED;
+                    lost(gone, "camera error " + error);
+                }
+
+                /** The system took the camera away (error 3): not one of the failures a camera is given up after. */
+                private boolean taken;
 
                 @Override public void onClosed(CameraDevice left) {
+                    // Only the camera of the latest attempt. A refused attempt leaves a camera object that reports
+                    // this when the system finalizes it, seconds later: on the desk (2026-11-21) that closed the
+                    // readers of the camera opened since, which then recorded one clip and never watched again.
+                    if (attempt != opens) return;
                     closing = false;
                     releaseReaders();
                     step();
@@ -587,12 +647,16 @@ final class ClipCamera implements PageCamera {
                     // now that a failed camera is opened again by itself, while the next one is being opened.
                     if (told || attempt != opens || (gone != device && !opening)) return;
                     told = true;
+                    if (taken) cameraFailures = Math.max(0, cameraFailures - 1); // fail() counts one; this is none
                     fail(reason, gone);
                 }
             }, handler);
         } catch (CameraAccessException | RuntimeException error) {
             opening = false;
             releaseReaders();
+            if (error instanceof CameraAccessException
+                    && ((CameraAccessException) error).getReason() == CameraAccessException.CAMERA_DISABLED
+                    && waitRefused("open")) return;
             fail("camera " + error, null);
         }
     }
@@ -602,6 +666,7 @@ final class ClipCamera implements PageCamera {
             if (watchReader != null) { watchReader.close(); watchReader = null; }
             if (clipReader != null) { clipReader.close(); clipReader = null; }
         }
+        if (gyroscope != null) sensors.unregisterListener(turningListener);
         if (framesThread != null) { framesThread.quitSafely(); framesThread = null; frames = null; }
     }
 
@@ -802,7 +867,6 @@ final class ClipCamera implements PageCamera {
             showProgress(started, true); // under the lock: before any report of a frame that counts
         }
         started.phase = RECORDING;
-        if (gyroscope != null) sensors.registerListener(turningListener, gyroscope, HeadMotion.PERIOD_MICROS, frames);
         handler.postDelayed(timer, MAX_MILLIS);
         made.setRepeatingRequest(request, new CameraCaptureSession.CaptureCallback() {
             @Override public void onCaptureCompleted(CameraCaptureSession source, CaptureRequest asked, TotalCaptureResult result) {
@@ -1001,7 +1065,6 @@ final class ClipCamera implements PageCamera {
         synchronized (lock) {
             if (recording == stopped) recording = null;
         }
-        if (gyroscope != null) sensors.unregisterListener(turningListener);
         // Once for a recording: abandon() also comes here for a clip not yet begun and for one already ended.
         if (stopped.phase == RECORDING) showProgress(stopped, false);
     }
@@ -1034,6 +1097,7 @@ final class ClipCamera implements PageCamera {
             turnedAt.put(ended.turnedAt[i]);
             for (int axis = 0; axis < 3; axis++) turned[axis].put(Math.round(ended.turned[3 * i + axis] * 10000f) / 10000.0);
         }
+        float[] taken = offset.value();
         JSONObject record = new JSONObject().put("schema", 1).put("capture_id", provenance.captureId)
                 .put("width", WIDTH).put("height", HEIGHT).put("rotation_degrees", options.rotationDegrees)
                 .put("exposure_ns", ended.exposure).put("sensitivity_iso", ISO).put("boost", ended.boost)
@@ -1041,7 +1105,10 @@ final class ClipCamera implements PageCamera {
                 .put("preview", new JSONObject().put("exposure_ns", ended.previewExposure)
                         .put("sensitivity_iso", ended.previewIso).put("boost", ended.previewBoost))
                 .put("frames", each).put("dropped", ended.dropped).put("settle", ended.settle)
-                .put("gyro", new JSONObject().put("t_ns", turnedAt).put("x", turned[0]).put("y", turned[1]).put("z", turned[2]));
+                // As the readings came; "gyro_offset" is what was taken out of them for the frames' smear (rad/s).
+                .put("gyro", new JSONObject().put("t_ns", turnedAt).put("x", turned[0]).put("y", turned[1]).put("z", turned[2]))
+                .put("gyro_offset", new JSONArray().put(round4(taken[0])).put(round4(taken[1])).put(round4(taken[2])))
+                .put("gyro_offset_known", offset.known());
         inbox.offer(provenance.captureId, record.toString().getBytes(StandardCharsets.UTF_8));
         return new GlassCamera.Captured(jpeg, WIDTH, HEIGHT, SystemClock.elapsedRealtime() - ended.askedAt, provenance);
     }
@@ -1062,6 +1129,8 @@ final class ClipCamera implements PageCamera {
         }
     }
 
+    private static double round4(float value) { return Math.round(value * 10000f) / 10000.0; }
+
     /** A page is handed over when its clip is closed and the camera watches again; the second is what the wearer waits for. */
     private void join() {
         Clip done = clip;
@@ -1073,7 +1142,10 @@ final class ClipCamera implements PageCamera {
                 + " kept=" + (done.page != null) + " short=" + shortClips
                 + " open_ms=" + done.openMillis + " idle_ms=" + done.idleMillis + " idle_timeout=" + done.idleTimeout
                 + " drain_ms=" + (done.closedAt - done.endedAt) + " page_ms=" + done.pageMillis
-                + " closed_ms=" + (SystemClock.elapsedRealtime() - done.closedAt));
+                + " closed_ms=" + (SystemClock.elapsedRealtime() - done.closedAt)
+                // the gyroscope's zero offset taken out of this clip's readings, thousandths of a rad/s about x, y, z
+                + " offset=" + Math.round(offset.value()[0] * 1000f) + "," + Math.round(offset.value()[1] * 1000f)
+                + "," + Math.round(offset.value()[2] * 1000f));
         if (done.page != null) {
             cameraFailures = 0;
             shortClips = 0;

@@ -79,7 +79,14 @@ import org.robolectric.shadows.ShadowSystemClock;
 public class CaptureInvariantsTest {
     private static final int SEEDS = 300;
 
+    /**
+     * How far the drawn sequences got. From 2026-11-18 to 11-19 every sequence ended at its first saved page (the way
+     * the upload was held back stopped the controller there), and "3000 sequences find nothing" was written twice.
+     */
+    private static int reachedTwoPages, reachedRetake;
+
     @Test public void randomGesturesCameraAnswersAndPassingTimeKeepTheCaptureInvariants() throws Exception {
+        reachedTwoPages = reachedRetake = 0;
         for (long seed = 1; seed <= SEEDS; seed++) {
             Finding found = explore(null, seed);
             if (found != null) {
@@ -87,6 +94,10 @@ public class CaptureInvariantsTest {
                         + "\nshortened: " + shorten(found));
             }
         }
+        String reach = SEEDS + " sequences: " + reachedTwoPages + " saved two pages or more, " + reachedRetake
+                + " were asked by the phone for pages again";
+        System.out.println("capture invariants reach: " + reach);
+        org.junit.Assert.assertTrue("the sequences end early: " + reach, reachedTwoPages * 5 >= SEEDS && reachedRetake * 20 >= SEEDS);
     }
 
     // ---- pages the phone asks for again before the booklet goes out (2026-11-19) ------------------------------------
@@ -153,6 +164,44 @@ public class CaptureInvariantsTest {
             org.junit.Assert.assertEquals(List.of(1, 2), photosOf(capture));
             // And a page taken after that end was asked for is an ordinary next page, were the capture taken up again.
             org.junit.Assert.assertTrue(((java.util.Collection<?>) get(capture.controller, "retakeQueue")).isEmpty());
+        }
+    }
+
+    /**
+     * Nobody may be looking when the phone asks: it asks once the clips are gathered, 83 s after the end on
+     * 2026-11-20, with the display long dark and the wearer waiting for answers. Until 2026-11-21 the booklet then
+     * waited for a page or a double tap without end, and no answer could come.
+     */
+    @Test public void pagesAskedForThatNobodyTakesInAMinuteDoNotHoldTheBookletBack() throws Exception {
+        try (Capture capture = new Capture()) {
+            take(capture, 2);
+            assertStep(capture, "DOUBLETAP");
+            assertStep(capture, "RETAKE:1");
+            assertStep(capture, "WAIT:59000");
+            org.junit.Assert.assertEquals("a minute is given", LocalCaptureSession.Phase.CAPTURE, capture.session.phase());
+            assertStep(capture, "WAIT:2000");
+            org.junit.Assert.assertEquals("then the booklet goes out as it is", LocalCaptureSession.Phase.ANALYSIS, capture.session.phase());
+            org.junit.Assert.assertEquals(List.of(1, 2), photosOf(capture));
+            org.junit.Assert.assertTrue(((java.util.Collection<?>) get(capture.controller, "retakeQueue")).isEmpty());
+        }
+    }
+
+    @Test public void aWearerWhoIsTakingThePagesIsNotCutOffByThatMinute() throws Exception {
+        try (Capture capture = new Capture()) {
+            take(capture, 2);
+            assertStep(capture, "DOUBLETAP");
+            assertStep(capture, "RETAKE:0,1");
+            assertStep(capture, "WAIT:50000");
+            for (String step : new String[]{"PAGE", "ACK", "ACK", "WAIT:1500"}) assertStep(capture, step);
+            assertStep(capture, "WAIT:15000"); // the page is being taken when the minute is up
+            org.junit.Assert.assertEquals(LocalCaptureSession.Phase.CAPTURE, capture.session.phase());
+            for (String step : new String[]{"PHOTO", "ACK", "WAIT:3100"}) assertStep(capture, step);
+            org.junit.Assert.assertEquals("the first page asked for is in", List.of(3, 2), photosOf(capture));
+            assertStep(capture, "WAIT:59000");
+            org.junit.Assert.assertEquals("and the next one has a minute of its own", LocalCaptureSession.Phase.CAPTURE, capture.session.phase());
+            assertStep(capture, "SWIPE"); // any gesture: the wearer is there
+            assertStep(capture, "WAIT:2000");
+            org.junit.Assert.assertEquals(LocalCaptureSession.Phase.CAPTURE, capture.session.phase());
         }
     }
 
@@ -337,12 +386,19 @@ public class CaptureInvariantsTest {
                     String broken = capture.step(step);
                     if (broken != null) found = new Finding(broken, capture.done);
                 }
+                int saved = capture.session.pageCount();
                 if (found == null) {
                     String broken = capture.end();
                     capture.done.add(CLOSE);
                     if (broken != null) found = new Finding(broken, capture.done);
                 }
-                if (!capture.storeFailed || attempt == 2) return found;
+                if (!capture.storeFailed || attempt == 2) {
+                    if (script == null) {
+                        if (saved >= 2) reachedTwoPages++;
+                        if (capture.done.stream().anyMatch(step -> step.startsWith("RETAKE:"))) reachedRetake++;
+                    }
+                    return found;
+                }
             }
         }
     }

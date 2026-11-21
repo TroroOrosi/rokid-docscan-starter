@@ -84,8 +84,10 @@ android {
         // 60 copies the preview plane once per frame and paces frames so results are not starved.
         // 61 keeps the session when the HAL drops a preview frame before any still is requested.
         // 97 adds two launch-only options for a worn pass (--ez watch_field, --ez watch_record); a use is unchanged.
-        versionCode = 97
-        versionName = "0.44.21"
+        // 98 takes the gyroscope's zero offset out of the stillness of a frame, waits for a camera the system
+        // refuses while the glasses sleep, and changes the answers' order and the double tap (Glasses View 1.54.0).
+        versionCode = 98
+        versionName = "0.44.22"
     }
 
     // Same reasoning as `:glassapp`: a vendor installer that reads JAR

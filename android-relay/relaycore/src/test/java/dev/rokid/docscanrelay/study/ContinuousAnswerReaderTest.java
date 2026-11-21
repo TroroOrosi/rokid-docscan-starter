@@ -100,30 +100,38 @@ public class ContinuousAnswerReaderTest {
         return screens;
     }
 
-    @Test public void certainAnswersComeFirstThenWhatToRetakeThenTheUncertainThenWhatWasAlreadyRead() {
+    @Test public void answersComeInThePapersOrderThenWhatToRetakeAndNothingOfWhatTheTwoReadsDoNotSettle() {
+        // The operator, 2026-11-19: where the other read differs or there is no answer, skip it, show the answers
+        // that are known one after another, and after them the captures to take again. Until 2026-11-21 an answer
+        // in doubt came behind the retake screen with ？ before it and the other read's answer after it: on
+        // 2026-11-20 thirty answers stood there, the first half of a paper behind its second half.
         AnswerReader reader = reader(mixed(), List.of(3, 8, 9));
         List<String> screens = screens(reader);
         assertEquals(List.of(
-                "1 ア　5 オ",
+                "1 ア　5 オ\n8 カ",
                 "再撮影 3・8・9\nダブルタップで撮影",
-                "？2 イ｜ウ\n6 解析中\n7 解析できません\n送れませんでした",
-                "？8 カ\n3 エ"), screens);
-        // No sentence about how an answer was reached, nothing of a question that cannot be answered, no notice.
+                "6 解析中\n7 解析できません\n送れませんでした\n3 エ"), screens);
+        // No mark, no sentence about how an answer was reached, nothing of a question that cannot be answered or
+        // that the two reads do not settle, no notice.
         String all = String.join("\n", screens);
-        for (String noise : List.of("要確認", "資料不足", "不一致", "図の右端", "縮小", "表示できない", "4 ")) {
+        for (String noise : List.of("？", "｜", "イ", "ウ", "要確認", "資料不足", "不一致", "図の右端", "縮小", "表示できない", "4 ")) {
             assertFalse(noise, all.contains(noise));
         }
         assertEquals("1", reader.indexLabel());
+        assertFalse(reader.onRetakeScreen());
         reader.forward();
         assertEquals("the screen that belongs to no question", "再撮影", reader.indexLabel());
+        assertTrue("where a double tap takes the captures again; on every other screen it ends the writing",
+                reader.onRetakeScreen());
         reader.forward();
-        assertEquals("2", reader.indexLabel());
+        assertEquals("6", reader.indexLabel());
+        assertFalse(reader.onRetakeScreen());
     }
 
     @Test public void theRetakeScreenIsThereOnlyWithPagesToRetakeAndBreaksItsRowBetweenPageNumbers() {
         AnswerReader none = reader(mixed(), List.of());
         assertTrue(none.retakePages().isEmpty());
-        assertEquals(List.of("1 ア　5 オ\n？2 イ｜ウ\n6 解析中\n7 解析できません", "送れませんでした\n？8 カ\n3 エ"),
+        assertEquals(List.of("1 ア　5 オ\n8 カ\n6 解析中\n7 解析できません", "送れませんでした\n3 エ"),
                 screens(none));
 
         List<Integer> many = List.of(3, 8, 9, 12, 15, 21);
@@ -138,8 +146,8 @@ public class ContinuousAnswerReaderTest {
         AnswerReader reader = reader(mixed(), List.of(3, 8, 9));
         assertEquals(1, reader.pageNumber());
         reader.backward();
-        assertEquals(4, reader.pageNumber());
-        assertEquals("q8", reader.current().questionId);
+        assertEquals(3, reader.pageNumber());
+        assertEquals("q6", reader.current().questionId);
         reader.forward();
         assertEquals(1, reader.pageNumber());
         assertEquals("q1", reader.current().questionId);
@@ -173,16 +181,18 @@ public class ContinuousAnswerReaderTest {
         reader.restore("q7", 0);
         assertEquals(3, reader.pageNumber());
         reader.restore("q3", 0); // before q5 on the paper, shown after everything else
-        assertEquals(4, reader.pageNumber());
+        assertEquals(3, reader.pageNumber());
         assertEquals("q3", reader.current().questionId);
         // A question that is not shown gives its place to the nearest one before it on the paper that is.
         reader.restore("q4", 0);
         assertEquals("q3", reader.current().questionId);
-        assertEquals(4, reader.pageNumber());
+        assertEquals(3, reader.pageNumber());
+        reader.restore("q2", 0); // what the two reads do not settle is not shown either
+        assertEquals("q1", reader.current().questionId);
         reader.restore("pages-reduced", 3);
         assertEquals("q8", reader.current().questionId);
         assertEquals(0, reader.offset());
-        assertEquals(4, reader.pageNumber());
+        assertEquals(1, reader.pageNumber());
 
         // A reading not yet begun is saved as the bundle's first question at its start: that is the first screen,
         // also when that question is shown further on. Before a view has given its size as well.
@@ -194,15 +204,15 @@ public class ContinuousAnswerReaderTest {
         assertEquals(1, fresh.pageNumber());
         assertEquals(List.of("1 ア"), fresh.page().lines);
         fresh.restore("q2", 1);
-        assertEquals(2, fresh.pageNumber());
-        assertEquals("q2", fresh.current().questionId);
+        assertEquals(1, fresh.pageNumber());
+        assertEquals("q1", fresh.current().questionId);
     }
 
     @Test public void thePlaceOnTheRetakeScreenIsKeptAsTheAnswerBeforeItAndOutlivesAReflow() {
         AnswerReader reader = reader(mixed(), List.of(3, 8, 9));
         reader.forward();
         assertEquals("再撮影", reader.indexLabel());
-        assertEquals("q5", reader.current().questionId);
+        assertEquals("q8", reader.current().questionId);
         assertEquals(0, reader.offset());
         reader.viewport(30, 4, String::length);
         assertEquals("the same screen at another size", List.of("再撮影 3・8・9", "ダブルタップで撮影"), reader.page().lines);
@@ -210,14 +220,14 @@ public class ContinuousAnswerReaderTest {
         AnswerReader restarted = reader(mixed(), List.of(3, 8, 9));
         restarted.restore(reader.current().questionId, reader.offset());
         assertEquals("after a restart: the answers just before it", 1, restarted.pageNumber());
-        assertEquals("5", restarted.indexLabel());
+        assertEquals("8", restarted.indexLabel());
 
         assertTrue(reader.accept(bundle(2, mixed(), List.of(3), false)));
         assertEquals("a newer revision leaves the wearer on it", List.of("再撮影 3", "ダブルタップで撮影"), reader.page().lines);
         assertTrue(reader.accept(bundle(3, mixed(), List.of(), false)));
-        assertEquals("nothing left to retake: the answer before it", "q5", reader.current().questionId);
+        assertEquals("nothing left to retake: the answer before it", "q8", reader.current().questionId);
         assertEquals(1, reader.pageNumber());
-        assertEquals("5", reader.indexLabel());
+        assertEquals("8", reader.indexLabel());
     }
 
     @Test public void aRevisionThatMovesTheQuestionBeingReadToAnotherSectionKeepsTheReaderOnIt() {
@@ -227,15 +237,20 @@ public class ContinuousAnswerReaderTest {
         reader.forward();
         assertEquals(List.of("2 イ"), reader.page().lines);
 
-        // The comparison of the two reads leaves this answer in doubt: it moves behind the certain ones.
+        // The comparison of the two reads leaves this answer in doubt: it is no longer shown, its capture is to
+        // be taken again, and the reader goes to the answer before it.
         List<AnswerItem> compared = List.of(first.get(0),
                 item("q2", 2, "イ", NEEDS_REVIEW, "2回の読みで不一致", "エ", false), first.get(2));
-        assertTrue(reader.accept(bundle(2, compared, List.of(), false)));
+        assertTrue(compared.get(1).uncertain);
+        assertTrue(reader.accept(bundle(2, compared, List.of(2), false)));
         assertFalse(reader.comparing());
-        assertEquals("q2", reader.current().questionId);
-        assertEquals(3, reader.pageNumber());
-        assertEquals(List.of("？2 イ｜エ"), reader.page().lines);
-        assertEquals(List.of("1 ア", "5 オ", "？2 イ｜エ"), screens(reader));
+        assertEquals("q1", reader.current().questionId);
+        assertEquals(1, reader.pageNumber());
+        assertEquals(List.of("1 ア"), reader.page().lines);
+        List<String> after = screens(reader);
+        assertEquals(List.of("1 ア", "5 オ"), after.subList(0, 2));
+        assertTrue(after.get(2), after.get(2).startsWith("再撮影"));
+        assertFalse("neither read's answer is shown", String.join("", after).contains("イ") || String.join("", after).contains("エ"));
 
         // It cannot be answered after all: its page is to be retaken, the reader goes to the answer before it.
         reader.restore("q2", 0);

@@ -164,6 +164,13 @@ public class AnswerBundleTest {
         assertEquals("", restored.items.get(0).other);
         assertFalse(restored.items.get(1).seen);
         assertEquals("ウ", restored.items.get(1).other);
+        assertTrue("what the two reads do not settle, by the server's mark or by its note from an older server",
+                restored.items.get(1).uncertain);
+        assertFalse(restored.items.get(0).uncertain);
+        assertFalse("an answer to check for its form is not that", new AnswerItem("g1", "大問1", "q3", "q3", "カ",
+                AnswerItem.Status.NEEDS_REVIEW, "表示できない要素: 表").uncertain);
+        assertTrue(new AnswerItem("g1", "大問1", "q4", "q4", "カ", AnswerItem.Status.NEEDS_REVIEW, "確認", List.of(),
+                List.of(), "", false, true).uncertain);
         assertEquals(bundle.toJson(), restored.toJson());
         assertThrows(UnsupportedOperationException.class, () -> restored.retake.add(1));
 
