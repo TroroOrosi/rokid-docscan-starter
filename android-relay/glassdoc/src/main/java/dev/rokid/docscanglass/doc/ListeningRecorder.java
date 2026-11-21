@@ -318,7 +318,7 @@ final class ListeningRecorder implements AutoCloseable {
         uploadError = null;
         for (int i = 0; i < chunks; i++) {
             upload(chunk(i), i, Math.max(0, (long)i * CHUNK - OVERLAP));
-            if (uploadError != null) throw new IOException("文字起こしが未完了です。原音は保存済みです", uploadError);
+            if (uploadError != null) throw new IOException("原音の転送が未完了です。録音は保存済みです", uploadError);
         }
         if (recordingError != null) throw new IOException(recordingError);
         if (closed) throw new IOException("録音は終了しています");

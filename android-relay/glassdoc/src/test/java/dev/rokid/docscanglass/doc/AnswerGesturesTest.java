@@ -38,6 +38,25 @@ public class AnswerGesturesTest {
         assertEquals(1, reader.pageNumber());
     }
 
+    /** Continuous reading, the mode the glasses use: past either end a swipe comes round to the other. */
+    @Test
+    public void swipesWrapAroundTheEndsOfContinuousReading() {
+        AnswerBundle bundle = new AnswerBundle("7", "a".repeat(64), 1, List.of(
+                AnswerItem.ready("g1", "第1問", "q10", "問1", "x = 2"),
+                AnswerItem.ready("g1", "第1問", "q11", "問2", "y = 3")));
+        // One row a screen, and a row holds one of the two answers: two screens.
+        AnswerReader reader = new AnswerReader(bundle, 400f, 1, text -> text.length() * 30f, true);
+        assertEquals(2, reader.pageCount());
+
+        assertTrue(AnswerGestures.apply(reader, GlassesInputAction.SWIPE_BACK));
+        assertEquals("back from the first screen is the last", 2, reader.pageNumber());
+        assertEquals("q11", reader.current().questionId);
+
+        assertTrue(AnswerGestures.apply(reader, GlassesInputAction.SWIPE_FORWARD));
+        assertEquals("forward from the last screen is the first", 1, reader.pageNumber());
+        assertEquals("q10", reader.current().questionId);
+    }
+
     @Test
     public void tapOpensTheMenu() {
         AnswerReader reader = reader();

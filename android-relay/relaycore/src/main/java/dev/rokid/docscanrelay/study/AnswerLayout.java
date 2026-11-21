@@ -1,10 +1,12 @@
 package dev.rokid.docscanrelay.study;
 
 import java.text.BreakIterator;
+import java.util.AbstractList;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
 import java.util.Locale;
+import java.util.RandomAccess;
 
 /** Pixel-measured pagination. Source offsets preserve every character for resume/reflow. */
 public final class AnswerLayout {
@@ -16,11 +18,17 @@ public final class AnswerLayout {
         public final int start;
         public final int end;
         public final List<String> lines;
+        /** True when the display row starts inside the same source line, including across pages. */
+        public final List<Boolean> continuedFromPreviousLine;
+        /** Exact original fragment, including original line endings and indentation. */
+        public final String sourceText;
 
-        private Page(int start, int end, List<String> lines) {
+        private Page(int start, int end, List<String> lines, List<Boolean> continued, String sourceText) {
             this.start = start;
             this.end = end;
             this.lines = Collections.unmodifiableList(new ArrayList<>(lines));
+            this.continuedFromPreviousLine = Collections.unmodifiableList(new ArrayList<>(continued));
+            this.sourceText = sourceText;
         }
     }
 
@@ -30,42 +38,159 @@ public final class AnswerLayout {
                 || width <= 0 || linesPerPage < 1) {
             throw new IllegalArgumentException("invalid answer viewport");
         }
-        List<Page> pages = new ArrayList<>();
-        List<String> lines = new ArrayList<>();
-        BreakIterator clusters = BreakIterator.getCharacterInstance(Locale.ROOT);
-        clusters.setText(text);
+        Pagination pages = new Pagination(text, width, linesPerPage, measurer);
         int start = 0;
-        int pageStart = 0;
         while (start < text.length()) {
-            int end = start;
-            int preferredBreak = start;
-            while (end < text.length() && text.charAt(end) != '\n' && text.charAt(end) != '\r') {
-                int next = clusterEnd(text, clusters, end);
-                float measured = measurer.width(text.substring(start, next));
-                if (!Float.isFinite(measured) || measured < 0) {
-                    throw new IllegalArgumentException("invalid font measurement");
-                }
-                if (measured > width) {
-                    if (end == start) throw new IllegalArgumentException("viewport narrower than glyph");
-                    if (preferredBreak > start) end = preferredBreak;
-                    break;
-                }
-                end = next;
-                int last = text.codePointBefore(end);
-                if (Character.isWhitespace(last) || "、。;,:".indexOf(last) >= 0) preferredBreak = end;
+            start = lineEnd(text, start, width, measurer, pages.clusters);
+            pages.addLineEnd(start);
+        }
+        return Collections.unmodifiableList(pages);
+    }
+
+    private static final String OPENING = "(（[［{｛";
+    private static final String CLOSING = ")）]］}｝";
+    /** Marks no line begins with. */
+    private static final String NOT_FIRST = "、。，．,.)）]］}｝」』】!?！？:;：；";
+
+    private static int lineEnd(String text, int start, float width,
+                               Measurer measurer, BreakIterator clusters) {
+        int end = start;
+        int preferredBreak = start;
+        boolean hasNonWhitespace = false;
+        // A bracketed group such as a coordinate pair stays together when it can: on the glasses on 2026-11-16
+        // "(5," ended a line and "0)" began the next, and "R=(6-2a,-2b" one and ",3)" the next. Inside brackets a
+        // comma or colon is no place to break. A line that runs out there breaks where the formula began instead:
+        // where Japanese text ends and a letter, a figure, a sign or an opening bracket follows (so f(a,b) is not
+        // torn from f, nor a root sign from what it covers), when the formula so far takes at most half the line
+        // (a long remark in brackets still fills its line).
+        int depth = 0;
+        int runBreak = start;
+        while (end < text.length() && text.charAt(end) != '\n' && text.charAt(end) != '\r') {
+            int next = clusterEnd(text, clusters, end);
+            float measured = measurer.width(text.substring(start, next));
+            if (!Float.isFinite(measured) || measured < 0) {
+                throw new IllegalArgumentException("invalid font measurement");
             }
-            lines.add(text.substring(start, end));
-            if (end < text.length() && text.charAt(end) == '\r') end++;
-            if (end < text.length() && text.charAt(end) == '\n') end++;
-            start = end;
-            if (lines.size() == linesPerPage || end == text.length()) {
-                pages.add(new Page(pageStart, end, lines));
-                pageStart = end;
-                lines.clear();
+            if (measured > width) {
+                if (end == start) throw new IllegalArgumentException("viewport narrower than glyph");
+                int held = preferredBreak;
+                if (depth > 0 && runBreak > preferredBreak && measurer.width(text.substring(runBreak, end)) * 2
+                        <= measurer.width(text.substring(start, end))) {
+                    held = runBreak;
+                }
+                if (held > start) {
+                    end = held;
+                } else {
+                    // No line begins with a closing mark (a line held "、" and nothing else, another began
+                    // "))。"): closing marks that follow one another come down with the character before them.
+                    int back = end;
+                    while (back > start && NOT_FIRST.indexOf(text.codePointAt(back)) >= 0) back = clusters.preceding(back);
+                    if (back > start) end = back;
+                }
+                break;
+            }
+            int first = text.codePointAt(end);
+            int last = text.codePointBefore(next);
+            if (depth == 0 && end > start && text.codePointBefore(end) >= 0x2E80 && (OPENING.indexOf(first) >= 0
+                    || (first < 0x2E80 && !Character.isWhitespace(first) && NOT_FIRST.indexOf(first) < 0))) {
+                runBreak = end;
+            }
+            if (OPENING.indexOf(last) >= 0) {
+                depth++;
+            } else if (CLOSING.indexOf(last) >= 0) {
+                depth = Math.max(0, depth - 1);
+            }
+            end = next;
+            if (!Character.isWhitespace(last)) hasNonWhitespace = true;
+            if (hasNonWhitespace && (Character.isWhitespace(last) || "、。;".indexOf(last) >= 0
+                    || (depth == 0 && ",:".indexOf(last) >= 0))) {
+                preferredBreak = end;
             }
         }
-        if (pages.isEmpty()) pages.add(new Page(0, 0, Collections.singletonList("")));
-        return Collections.unmodifiableList(pages);
+        if (end < text.length() && text.charAt(end) == '\r') end++;
+        if (end < text.length() && text.charAt(end) == '\n') end++;
+        return end;
+    }
+
+    /** Index small page groups and materialize only the current page. */
+    private static final class Pagination extends AbstractList<Page> implements RandomAccess {
+        private static final int BLOCK_SIZE = 4096;
+        private static final int INDEX_LINES = 32;
+        private final String text;
+        private final float width;
+        private final int linesPerPage;
+        private final Measurer measurer;
+        private final BreakIterator clusters;
+        private final int pagesPerIndex;
+        private final int linesPerIndex;
+        private final List<int[]> indexEnds = new ArrayList<>();
+        private int lineCount;
+        private int indexCount;
+        private int cachedIndex = -1;
+        private Page cachedPage;
+
+        Pagination(String text, float width, int linesPerPage, Measurer measurer) {
+            this.text = text;
+            this.width = width;
+            this.linesPerPage = linesPerPage;
+            this.measurer = measurer;
+            clusters = BreakIterator.getCharacterInstance(Locale.ROOT);
+            clusters.setText(text);
+            pagesPerIndex = Math.max(1, INDEX_LINES / linesPerPage);
+            linesPerIndex = linesPerPage * pagesPerIndex;
+        }
+
+        void addLineEnd(int end) {
+            lineCount++;
+            if (lineCount % linesPerIndex == 0) addIndexEnd(end);
+        }
+
+        private void addIndexEnd(int end) {
+            if (indexCount % BLOCK_SIZE == 0) {
+                indexEnds.add(new int[Math.min(BLOCK_SIZE,
+                        1 + text.length() / linesPerIndex - indexCount)]);
+            }
+            indexEnds.get(indexCount / BLOCK_SIZE)[indexCount % BLOCK_SIZE] = end;
+            indexCount++;
+        }
+
+        private int indexEnd(int index) {
+            return index < 0 ? 0 : indexEnds.get(index / BLOCK_SIZE)[index % BLOCK_SIZE];
+        }
+
+        @Override public int size() {
+            return lineCount == 0 ? 1 : 1 + (lineCount - 1) / linesPerPage;
+        }
+
+        @Override public synchronized Page get(int index) {
+            if (index < 0 || index >= size()) throw new IndexOutOfBoundsException();
+            if (index == cachedIndex) return cachedPage;
+            if (lineCount == 0) return new Page(0, 0, Collections.singletonList(""),
+                    Collections.singletonList(false), "");
+            int group = index / pagesPerIndex;
+            int start = indexEnd(group - 1);
+            int skippedLines = index % pagesPerIndex * linesPerPage;
+            for (int line = 0; line < skippedLines; line++) {
+                start = lineEnd(text, start, width, measurer, clusters);
+            }
+            int firstLine = index * linesPerPage;
+            int lastLine = firstLine + Math.min(linesPerPage, lineCount - firstLine);
+            int pageStart = start;
+            List<String> lines = new ArrayList<>();
+            List<Boolean> continued = new ArrayList<>();
+            for (int line = firstLine; line < lastLine; line++) {
+                continued.add(start > 0 && text.charAt(start - 1) != '\n' && text.charAt(start - 1) != '\r');
+                int consumedEnd = lineEnd(text, start, width, measurer, clusters);
+                int end = consumedEnd;
+                if (end > start && text.charAt(end - 1) == '\n') end--;
+                if (end > start && text.charAt(end - 1) == '\r') end--;
+                lines.add(text.substring(start, end));
+                start = consumedEnd;
+            }
+            cachedIndex = index;
+            cachedPage = new Page(pageStart, start, lines, continued, text.substring(pageStart, start));
+            return cachedPage;
+        }
     }
 
     private static int clusterEnd(String text, BreakIterator clusters, int start) {

@@ -8,10 +8,13 @@ registries; see docs/exam-solver-architecture.md and docs/cxr-l-integration.md.
 
 from __future__ import annotations
 
+import dataclasses
+import functools
 import hashlib
 import hmac
 import io
 import json
+import traceback
 import os
 import re
 import sqlite3
@@ -19,24 +22,30 @@ import threading
 import time
 import urllib.parse
 import uuid
-from contextlib import asynccontextmanager, contextmanager
+from contextlib import asynccontextmanager, closing, contextmanager
 from pathlib import Path
+from typing import Literal
 
 from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile
 from fastapi.responses import JSONResponse, Response
 from PIL import Image, UnidentifiedImageError
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict, StrictInt, StrictStr, validator
 from starlette.concurrency import run_in_threadpool
 
-from . import config, db
+from . import codex_update, config, db, page_clips, retention
 from .audio_formats import safe_audio_suffix
 from .analyzers import get_analyzer
 from .answer_text import to_display_answer
+from .answer_diagrams import diagram_schema_version
 from .config import IMAGE_DIR, ensure_dirs
+from .capture_provenance import JPEG_PIXEL_FIELDS, jpeg_pixel_evidence, parse_capture_metadata, parse_capture_provenance
+from .capture_video_upload import receive_capture_video
+from .capture_inspection import read_inspection, register_native, register_video, registration_summary, stop_worker, wake_worker
 from .explainer import ExplainRequest, ExplainResult
 from .explainers import get_explainer, list_explainers
 from .extractors import detect_media, get_extractor
 from .glassdoc_contract import GLASSDOC_OPERATION_CONTRACT
+from .glasses_state import GlassesState, list_states, read_state, record_state, state_guard
 from .glasses_view import (
     CAPTURE_CONTRACT,
     EXPLAIN_STAGES,
@@ -57,7 +66,13 @@ from .glasses_view import (
 )
 from .hud import build_hud
 from .input_identity import file_sha256
-from .layout import parse_layout, primary_question, segment_problems
+from .layout import (
+    ProblemUnit,
+    parse_layout,
+    primary_question,
+    segment_problems,
+    unique_question_numbers,
+)
 from .llm import clamp01
 from .matching import (
     Candidate,
@@ -69,14 +84,29 @@ from .matching import (
 )
 from .matching import verdict as match_verdict
 from .overlay import build_overlay
-from .page_pdf import images_to_pdf
+from .page_gather import GatherService
 from .retrieval import retrieve_context
-from .solvers import Question, get_solver
-from .solvers.llm_adapter import paste_prompt
-from .solvers.chatgpt_web import ChatGptWebUncertain
-from .solvers.registry import solve_with_fallback
+from .solvers import Question, SolveResult, get_solver
+from .solvers.llm_adapter import answer_numbers, paste_prompt
+from .solvers.chatgpt_web import (
+    ChatGptWebAttachmentFailed, ChatGptWebAuthenticationRequired,
+    ChatGptWebBlocked, ChatGptWebBrowserUnavailable, ChatGptWebBusy,
+    ChatGptWebChatLost, ChatGptWebError, ChatGptWebModelMismatch, ChatGptWebRateLimit,
+    ChatGptWebUploadBudget,
+    ChatGptWebReplyIncomplete,
+    ChatGptWebSendNotAuthorized, ChatGptWebUncertain, FAILURE_CODES, UPLOAD_ROUNDS, chatgpt_send_enabled,
+    recent_failures,
+)
+from .solvers.registry import has_booklet_route, solve_with_fallback
+from .solvers.chatgpt_work import WorkBrowserUncertain, sessions_with_a_send_on_record, work_binding, work_holds
+from .work_bridge import (
+    WorkBrowserResultRejected, WorkConflict, WorkPending, WorkReadabilityRejected, WorkStore, configured_work_store,
+)
 from .subjects import detect_subject
 from .version import APP_VERSION, HUD_CONTRACT_VERSION, version_info
+
+# Routes that wait for ROKID_CHATGPT_SEND_ENABLED before they spend the operator's subscription. Work has its own gate.
+_SEND_GATED_ROUTES = ("chatgpt-web", "codex-cli")
 
 
 def _extract_media(ocr_text: str | None, image_path: str | None) -> list[dict]:
@@ -104,8 +134,25 @@ async def lifespan(app: FastAPI):
         from .solvers import get_solver  # noqa: PLC0415
 
         get_analyzer()
-        get_solver()
-    yield
+        if (os.environ.get("ROKID_SOLVER") or "").strip() not in ("chatgpt-web", "chatgpt-work", "codex-cli"):
+            get_solver()
+        # The separately supervised Termux Chromium may still be starting.
+        # Its loopback CDP and authentication are checked before sending.
+    _resume_all_answers()
+    wake_worker()
+    page_clips.requeue_interrupted()  # a clip that was being gathered when the server stopped
+    # Clips nobody reads any more go (app/retention.py). On a thread: a first sweep has gigabytes to remove and the
+    # health check is waiting.
+    threading.Thread(target=retention.sweep, name="retention", daemon=True).start()
+    gather_service.start()
+    stopping = threading.Event()
+    threading.Thread(target=_route_check_daily, args=(stopping,), name="route-check", daemon=True).start()
+    try:
+        yield
+    finally:
+        stopping.set()
+        stop_worker()
+        gather_service.stop()
 
 
 app = FastAPI(title="Rokid DocScan", version=APP_VERSION, lifespan=lifespan)
@@ -125,14 +172,371 @@ async def _auth_middleware(request: Request, call_next):
     # (a client appending a slash to a discovery URL must not be locked out
     # before it can negotiate contracts).
     path = request.url.path.rstrip("/") or "/"
+    if (path in ("/v1/glasses/state", "/v1/capture-videos", "/v1/capture-inspections") or path.startswith(("/v1/work/", "/v1/capture-inspections/"))) and not config.API_KEY:
+        return JSONResponse({"detail": "authentication_not_configured",
+                             "code": "authentication_failed"}, status_code=503)
     if config.API_KEY and path not in config.AUTH_EXEMPT_PATHS:
         # Constant-time compare over bytes: str-compare leaks length/prefix
         # timing, and compare_digest rejects non-ASCII str inputs.
         expected = f"Bearer {config.API_KEY}".encode("utf-8")
         provided = request.headers.get("authorization", "").encode("utf-8")
         if not hmac.compare_digest(provided, expected):
-            return JSONResponse({"detail": "unauthorized"}, status_code=401)
+            return JSONResponse({"detail": "unauthorized", "code": "authentication_failed"}, status_code=401)
     return await call_next(request)
+
+
+def _work_current_job(job_id: str) -> tuple[WorkStore, dict]:
+    """A sealed input and still-active glasses generation authorize write-back."""
+    store = configured_work_store()
+    try:
+        job = store.get(job_id)
+    except KeyError:
+        raise HTTPException(status_code=404, detail="Work job not found") from None
+    conn = db.connect()
+    try:
+        session = _exam_session_or_404(conn, job["session_id"])
+        if (_session_phase(session) != "reviewing" or not session["document_id"]
+                or (session["mode"] == "real" and not config.ALLOW_REAL_EXAM_SOLVE)):
+            raise WorkConflict("the Work session is not open for answers")
+        device_id, generation = work_binding(job["session_id"])
+        if device_id != job["device_id"] or generation != job["generation"]:
+            raise WorkConflict("the glasses generation changed")
+        images = [source for source in job["sources"] if "page_number" in source]
+        current = _document_source_pages(conn, session["document_id"], job["session_id"], work_originals=True)
+        if ([(item["page_number"], item["sha256"], item.get("capture_provenance"),
+              item.get("canonical_image_sha256")) for item in images]
+                != [(item["page_number"], item["image_sha256"], item.get("capture_provenance"),
+                     item.get("canonical_image_sha256")) for item in current]):
+            raise WorkConflict("the original document identity changed")
+        recordings = [source for source in job["sources"] if "page_number" not in source]
+        if recordings and (len(recordings) != 1
+                or file_sha256(session["audio_path"]) != recordings[0]["sha256"]):
+            raise WorkConflict("the completed original recording identity changed")
+    except (WorkConflict, ValueError) as error:
+        raise HTTPException(status_code=409, detail=str(error)) from None
+    finally:
+        conn.close()
+    return store, job
+
+
+def _commit_work_browser_result(job_id: str, **payload) -> dict:
+    """Seal an internal browser result while its input/wearer is still current.
+
+    This is not an HTTP transport selector. The public result endpoint retains
+    its separate calibrated inspection requirements. Browser/network work must
+    finish before entering this short notification-state critical section.
+    """
+    with state_guard():
+        try:
+            store, job = _work_current_job(job_id)
+        except HTTPException as error:
+            raise WorkConflict("the Work browser input is no longer current") from error
+        # Another authorized consumer can finish while the browser is working.
+        # Its already validated immutable answer wins over a late browser body.
+        if job["status"] == "completed":
+            return job
+        if payload.get("manifest_sha256") != job["manifest_sha256"]:
+            raise WorkBrowserResultRejected("the browser result does not match the sealed original manifest")
+        return store.submit_browser_result(job_id, **payload)
+
+
+@contextmanager
+def _expired_work_job_guard(job_id: str):
+    """Authorize only journal retirement, never an old answer or another send."""
+    with state_guard():
+        try:
+            job = configured_work_store().get(job_id)
+        except KeyError:
+            raise WorkConflict("the expired Work owner is unavailable") from None
+        with _background_solves_lock:
+            if job["session_id"] in _background_solves:
+                raise WorkPending(job_id)
+            states = list_states()
+            owners = [state for state in states if state["device_id"] == job["device_id"]]
+            if (not job["device_id"] or len(owners) != 1
+                    or sum(state["session_id"] == job["session_id"] for state in states) > 1):
+                raise WorkConflict("the expired Work wearer is unavailable or ambiguous")
+            owner = owners[0]
+            if owner["generation"] < job["generation"]:
+                raise WorkConflict("the Work wearer generation is not established")
+            expired = (owner["generation"] > job["generation"]
+                       or owner["session_id"] != job["session_id"]
+                       or owner["phase"] in ("closed", "writing_done"))
+            conn = db.connect()
+            try:
+                session = _exam_session_or_404(conn, job["session_id"])
+                if not expired:
+                    if not session["document_id"]:
+                        raise WorkConflict("the Work input identity is unavailable")
+                    pages = _document_source_pages(conn, session["document_id"], job["session_id"], work_originals=False)
+                    if not pages or any(not re.fullmatch(r"[a-f0-9]{64}", page["image_sha256"]) for page in pages):
+                        raise WorkConflict("the Work input identity is unavailable")
+                    images = [source for source in job["sources"] if "page_number" in source]
+                    expired = ([(page["page_number"], page["image_sha256"], page.get("capture_provenance"))
+                                for page in pages]
+                               != [(source["page_number"], source.get("canonical_image_sha256", source["sha256"]),
+                                    source.get("capture_provenance")) for source in images])
+                    recordings = [source for source in job["sources"] if "page_number" not in source]
+                    if recordings:
+                        current_audio = file_sha256(session["audio_path"])
+                        if len(recordings) != 1 or not re.fullmatch(r"[a-f0-9]{64}", current_audio):
+                            raise WorkConflict("the Work audio identity is unavailable")
+                        expired = expired or current_audio != recordings[0]["sha256"]
+            except HTTPException as error:
+                raise WorkConflict("the expired Work session is unavailable") from error
+            finally:
+                conn.close()
+            if not expired:
+                raise WorkConflict("the Work job is still current")
+            yield job
+
+
+@app.get("/v1/work/jobs")
+def work_jobs(cursor: int = 0, limit: int = 100) -> dict:
+    """Phone-local transport queue; an official Work connector is still required."""
+    try:
+        return configured_work_store().list_jobs(cursor=cursor, limit=limit)
+    except ValueError as error:
+        raise HTTPException(status_code=400, detail=str(error)) from None
+
+
+@app.get("/v1/work/jobs/{job_id}")
+def work_job(job_id: str) -> dict:
+    _, job = _work_current_job(job_id)
+    return job
+
+
+@app.get("/v1/work/jobs/{job_id}/sources/{source_id}")
+def work_original(job_id: str, source_id: str) -> Response:
+    store, _ = _work_current_job(job_id)
+    try:
+        data, metadata = store.read_source(job_id, source_id)
+    except KeyError:
+        raise HTTPException(status_code=404, detail="Work original not found") from None
+    except WorkConflict as error:
+        raise HTTPException(status_code=409, detail=str(error)) from None
+    return Response(data, media_type=metadata["mime_type"], headers={
+        "X-Work-Source-SHA256": metadata["sha256"],
+        "X-Work-Source-Receipt": metadata["receipt"], "Cache-Control": "no-store"})
+
+
+class _WorkPayload(BaseModel):
+    if hasattr(BaseModel, "model_dump"):
+        model_config = ConfigDict(extra="forbid")
+    else:
+        class Config:
+            extra = "forbid"
+
+        @classmethod
+        def validate(cls, value):
+            # V1 otherwise coerces pair arrays into objects, including receipts.
+            if not isinstance(value, (dict, cls)):
+                raise ValueError("expected an object")
+            return super().validate(value)
+
+        @validator("response", "result", pre=True, check_fields=False, allow_reuse=True)
+        def _strict_object(cls, value):
+            if type(value) is not dict:
+                raise ValueError("expected an object")
+            return value
+
+    def transport_dict(self) -> dict:
+        if hasattr(self, "model_dump"):
+            return self.model_dump()
+        return self.dict()
+
+
+class WorkInspectionReceipt(_WorkPayload):
+    image_id: StrictStr
+    sha256: StrictStr
+    receipt: StrictStr
+
+
+class WorkSourceReceipt(_WorkPayload):
+    source_id: StrictStr
+    sha256: StrictStr
+    receipt: StrictStr
+    delivery: Literal["original_bytes"] = "original_bytes"
+
+
+class WorkTileSourceReceipt(_WorkPayload):
+    source_id: StrictStr
+    sha256: StrictStr
+    delivery: Literal["native_tiles"]
+    inspection_manifest_sha256: StrictStr
+    image_receipts: list[WorkInspectionReceipt]
+
+
+class WorkAnswerPayload(_WorkPayload):
+    manifest_sha256: StrictStr
+    generation: StrictInt
+    conversation_id: StrictStr
+    source_receipts: list[WorkSourceReceipt | WorkTileSourceReceipt]
+    result: dict
+
+
+class WorkQualityPayload(_WorkPayload):
+    response: dict
+    image_receipts: list[WorkInspectionReceipt]
+
+
+@app.get("/v1/work/jobs/{job_id}/sources/{source_id}/quality")
+def work_quality_request(job_id: str, source_id: str) -> dict:
+    store, _ = _work_current_job(job_id)
+    try:
+        return store.quality_request(job_id, source_id)
+    except KeyError:
+        raise HTTPException(status_code=404, detail="Work image not found") from None
+    except ValueError as error:
+        raise HTTPException(status_code=409, detail=str(error)) from None
+
+
+@app.get("/v1/work/jobs/{job_id}/sources/{source_id}/quality/images/{image_id}")
+def work_quality_image(job_id: str, source_id: str, image_id: str) -> Response:
+    store, _ = _work_current_job(job_id)
+    try:
+        data, metadata = store.read_quality_image(job_id, source_id, image_id)
+    except KeyError:
+        raise HTTPException(status_code=404, detail="Work inspection image not found") from None
+    except WorkConflict as error:
+        raise HTTPException(status_code=409, detail=str(error)) from None
+    return Response(data, media_type="image/png", headers={
+        "X-Work-Source-SHA256": metadata["sha256"],
+        "X-Work-Source-Receipt": metadata["receipt"], "Cache-Control": "no-store"})
+
+
+@app.post("/v1/work/jobs/{job_id}/sources/{source_id}/quality")
+def work_quality_result(job_id: str, source_id: str, payload: WorkQualityPayload) -> dict:
+    with state_guard():
+        store, _ = _work_current_job(job_id)
+        try:
+            return store.submit_quality(job_id, source_id, **payload.transport_dict())
+        except (ValueError, KeyError) as error:
+            raise HTTPException(status_code=409, detail=str(error)) from None
+
+
+@app.post("/v1/work/jobs/{job_id}/result")
+def work_answer(job_id: str, payload: WorkAnswerPayload) -> dict:
+    with state_guard():
+        store, job = _work_current_job(job_id)
+        try:
+            accepted = store.submit_result(job_id, **payload.transport_dict())
+        except (ValueError, WorkConflict) as error:
+            raise HTTPException(status_code=409, detail=str(error)) from None
+        conn = db.connect()
+        try:
+            # Reuse the existing claim/atomic answer-deck commit. Scheduling is
+            # local; the worker checks this generation again before consuming.
+            _resume_answers(conn, _exam_session_or_404(conn, job["session_id"]))
+        finally:
+            conn.close()
+        return accepted
+
+
+@app.post("/v1/glasses/state")
+def glasses_notify(state: GlassesState, request: Request) -> dict:
+    try:
+        return {"accepted": record_state(state, request.client.host)}
+    except (OSError, ValueError, TypeError, KeyError):
+        raise HTTPException(status_code=503, detail="state_unavailable") from None
+
+
+@app.post("/v1/capture-videos")
+async def capture_video_upload(request: Request, video: UploadFile = File(...), metadata: str = Form(...)) -> JSONResponse:
+    receipt, created = await receive_capture_video(video, metadata, request.client.host if request.client else "")
+    await run_in_threadpool(register_video, receipt)
+    return JSONResponse(receipt, status_code=201 if created else 200)
+
+
+@app.get("/v1/capture-inspections")
+def capture_inspection_lookup(device_id: str, generation: int, capture_id: str) -> dict:
+    return capture_inspection_status(None, device_id, generation, capture_id)
+
+
+@app.get("/v1/capture-inspections/{inspection_id}")
+def capture_inspection_status(inspection_id: str | None, device_id: str, generation: int, capture_id: str) -> dict:
+    try:
+        return read_inspection(inspection_id, device_id=device_id, generation=generation, capture_id=capture_id)
+    except KeyError:
+        raise HTTPException(status_code=404, detail="capture inspection not found") from None
+    except WorkConflict as error:
+        raise HTTPException(status_code=409, detail=str(error)) from None
+    except (OSError, ValueError, TypeError, sqlite3.Error):
+        raise HTTPException(status_code=503, detail="capture inspection unavailable") from None
+
+
+# What the watcher's poll last found for a booklet whose answers are complete: session -> (what that hangs on, the
+# stage, the revision). The poll comes twice a second for as long as the wearer waits or reads, and each one built the
+# whole bundle again (on the phone at rest, 2026-11-19: 6% of a core). In memory: after a start it is built once more.
+_settled_polls: dict[int, tuple] = {}
+
+
+def _settled_key(session_id: int) -> tuple | None:
+    """What a complete booklet's answers hang on, in one cheap look: the newest answer, the reading's status and
+    stage, a retake, and whether a comparison is under way. None for a reading that does not exist."""
+    try:
+        with closing(db.connect()) as conn:
+            row = conn.execute(
+                "SELECT e.status, e.analysis_stage, e.retake_json, (SELECT MAX(s.id) FROM solutions s JOIN questions q "
+                "ON q.id = s.question_id WHERE q.session_id = e.id) FROM exam_sessions e WHERE e.id = ?",
+                (session_id,)).fetchone()
+    except sqlite3.Error:
+        return None
+    return None if row is None else (*tuple(row), session_id in _comparing)
+
+
+@app.get("/v1/glasses/state")
+def glasses_status(device_id: str | None = None) -> dict:
+    try:
+        if device_id is None:
+            return {"devices": [{**state, "answer_ready": False,
+                                 "available_stage": "none", "answer_revision": 0}
+                                for state in list_states()]}
+        state = read_state(device_id)
+    except (OSError, ValueError, TypeError, KeyError):
+        raise HTTPException(status_code=503, detail="state_unavailable") from None
+    if state is None:
+        raise HTTPException(status_code=404, detail="no_glasses_state")
+    ready = False
+    available, revision = "none", 0
+    if state["phase"] in ("analyzing", "waiting", "reading") and state["session_id"] is not None:
+        session_id = state["session_id"]
+        key = _settled_key(session_id)
+        kept = _settled_polls.get(session_id)
+        if kept is not None and key is not None and kept[0] == key:
+            # Settled answers, and nothing they hang on has moved since they were last built.
+            ready, available, revision = True, kept[1], kept[2]
+        else:
+            _settled_polls.pop(session_id, None)
+            try:
+                # Also resumes a pre-send failure on the phone, without glasses polling.
+                # Asked twice a second by the watcher: the answers' state only, without hashing every page file.
+                bundle = _answer_snapshot(session_id, identify=False)
+                items = bundle["items"]
+                available = bundle.get("available_stage", "complete" if items and all(
+                    item["status"] != "pending" for item in items) else "none")
+                revision = bundle.get("revision", 0)
+                ready = bool(items) and available in ("reading", "complete")
+                if (ready and available == "complete" and key is not None and key == _settled_key(session_id)
+                        and all(item["status"] in ("ready", "needs_review", "needs_input") for item in items)):
+                    if len(_settled_polls) >= 8:
+                        _settled_polls.clear()
+                    _settled_polls[session_id] = (key, available, revision)
+            except HTTPException as error:
+                if error.status_code not in (404, 409):
+                    raise
+    # A writing-done notification may commit while the bundle is being read.
+    # Return the newer phase instead of a wake permission for an ended run.
+    try:
+        latest = read_state(device_id)
+    except (OSError, ValueError, TypeError, KeyError):
+        raise HTTPException(status_code=503, detail="state_unavailable") from None
+    if latest is None:
+        raise HTTPException(status_code=503, detail="state_unavailable")
+    if latest != state:
+        return {**latest, "answer_ready": False, "available_stage": "none", "answer_revision": 0}
+    return {**state, "answer_ready": ready, "available_stage": available, "answer_revision": revision}
+
 
 
 # --- request/response models ------------------------------------------------
@@ -146,17 +550,20 @@ class CreateDocument(BaseModel):
 
 # --- helpers ----------------------------------------------------------------
 
-_MAX_UPLOAD_BYTES = 15 * 1024 * 1024  # generous for page photos / recordings
+_MAX_UPLOAD_BYTES = 15 * 1024 * 1024  # Audio chunks retain their existing budget.
+# Matches CaptureSurface.MAX_JPEG_BYTES and covers the camera's 18,457,096-byte maximum.
+_MAX_IMAGE_UPLOAD_BYTES = 20 * 1024 * 1024
 # The relay camera is 12 MP. Keep enough headroom for imported scans while
 # bounding decoded memory independently of the compressed upload byte limit.
 _MAX_IMAGE_PIXELS = 25_000_000
 
 
-async def _read_upload_limited(upload: UploadFile) -> bytes:
+async def _read_upload_limited(upload: UploadFile, maximum: int | None = None) -> bytes:
     """Read an UploadFile with a hard size cap (memory-exhaustion guard)."""
-    raw = await upload.read(_MAX_UPLOAD_BYTES + 1)
-    if len(raw) > _MAX_UPLOAD_BYTES:
-        raise HTTPException(status_code=413, detail="upload too large (max 15MB)")
+    maximum = _MAX_UPLOAD_BYTES if maximum is None else maximum
+    raw = await upload.read(maximum + 1)
+    if len(raw) > maximum:
+        raise HTTPException(status_code=413, detail=f"upload too large (max {maximum} bytes)")
     return raw
 
 
@@ -201,6 +608,46 @@ def _rotate_image_for_ocr(img: Image.Image, rotation: int) -> Image.Image:
         270: Image.Transpose.ROTATE_90,
     }[rotation]
     return img if transpose is None else img.transpose(transpose)
+
+
+def _prepare_page_image(raw: bytes, rotation: int, *, encode: bool = True
+                        ) -> tuple[str | None, tuple[int, int], str | None, bytes | None]:
+    """Decode one uploaded photo, turn it upright, hash it and encode the PNG that is stored.
+
+    Returns the upload's own format and size, the upright image's pHash and the PNG's bytes. On the phone the
+    encoding of a real 4032x3024 photo takes 2.2 s (2026-11-15), so the upload handler runs this in a worker thread
+    before it takes the database's write lock. ``encode=False`` only decodes: a retry of a capture already stored
+    creates no image.
+    """
+    img = _load_image(raw)
+    source_format, source_size = img.format, img.size
+    if not encode:
+        return source_format, source_size, None, None
+    upright = _rotate_image_for_ocr(img, rotation)
+    encoded = io.BytesIO()
+    upright.convert("RGB").save(encoded, format="PNG")
+    return source_format, source_size, phash_hex(upright), encoded.getvalue()
+
+
+def _write_page_files(png_path: Path, png: bytes, original: bytes | None) -> None:
+    """Create the stored PNG, and the unchanged JPEG beside it for a native capture, synced to disk.
+
+    The PNG of a real photo is 29.7 MB (phone, 2026-11-15); the upload handler runs this in a worker thread before
+    it takes the database's write lock. The names are new each time, so a rejected upload only has to remove them.
+    """
+    for path, content in ((png_path, png), (png_path.with_suffix(".jpg"), original)):
+        if content is None:
+            continue
+        with path.open("xb") as saved:
+            saved.write(content)
+            saved.flush()
+            os.fsync(saved.fileno())
+    if os.name != "nt":
+        directory_fd = os.open(png_path.parent, os.O_RDONLY)
+        try:
+            os.fsync(directory_fd)
+        finally:
+            os.close(directory_fd)
 
 
 def _match_text(ocr_text: str | None, vision_text: str | None) -> str:
@@ -395,14 +842,51 @@ def provider_status() -> dict:
     The relay photographs a physical page before anything is analyzed. If the
     configured cloud analyzer has no credential it degrades to the offline
     placeholder silently, so without this block the operator only discovers it
-    after the session. This reports the state; it does not reject anything.
+    after the session. This reports the state; it does not reject anything --
+    including a provider ``config.require_real_provider`` would refuse under
+    ROKID_REAL_MODE=1. The glasses treat any /v1/settings failure as
+    unreachable, so that rejection must become a reported entry, not a 500.
+    Solving itself still goes through get_analyzer()/get_solver() (and
+    require_real_provider, unmodified) and still refuses.
+
+    Reads the selected provider straight from its registry rather than
+    through get_analyzer()/get_solver(), and calls ``.info()`` exactly once:
+    ``.info()`` can be expensive (chatgpt-web's ``ready()`` probes CDP with
+    retries), and calling it once via require_real_provider and again here to
+    build the report made an unready chatgpt-web selection take 10+ seconds.
+    The REAL_MODE verdict is derived from that one ``info`` with
+    ``config.real_mode_rejection`` -- the exact rule require_real_provider
+    uses. ``.info()`` itself is guarded: a provider whose ``.info()`` raises
+    (e.g. a probe returning something unexpected) must not 500 the endpoint,
+    and the exception text is never surfaced (it could carry a URL) --
+    only its class name.
     """
-    from .analyzers import get_analyzer
-    from .solvers import get_solver
+    from .analyzers.registry import _registry as analyzer_registry
+    from .solvers.registry import _registry as solver_registry
+
+    def _status(kind: str, registry) -> dict:
+        provider = registry.get()
+        if provider.name in _SEND_GATED_ROUTES and not chatgpt_send_enabled():
+            return {"name": provider.name, "ready": False, "code": "send_not_authorized",
+                    "message": "GPT submission has not been authorized for this runtime"}
+        try:
+            info = provider.info()
+        except Exception as error:  # noqa: BLE001 - a pre-flight report must not 500
+            return {"name": provider.name, "ready": False,
+                    "code": next((code for kind, code in _FAILURE_CODES if isinstance(error, kind)),
+                                 "provider_unavailable"),
+                    "message": f"{type(error).__name__} while checking"}
+        if provider.name == "chatgpt-web" and not info.get("ready"):
+            info = {**info, "code": "browser_unavailable"}
+        if config.REAL_MODE:
+            message = config.real_mode_rejection(kind, provider, info)
+            if message:
+                return {**info, "ready": False, "message": message}
+        return info
 
     return {
-        "analyzer": get_analyzer().info(),
-        "solver": get_solver().info(),
+        "analyzer": _status("analyzer", analyzer_registry),
+        "solver": _status("solver", solver_registry),
     }
 
 
@@ -421,6 +905,10 @@ def get_settings() -> dict:
         },
         "input": build_input_contract(),
         "providers": provider_status(),
+        "route_check": last_route_check(),
+        # The Codex CLI's release and when a newer one was last looked for; null where it is not kept up by itself.
+        "codex_update": codex_update.state(),
+        "route_failure": last_route_failure(),
         "versions": version_info(),
     }
 
@@ -447,9 +935,36 @@ def create_document(payload: CreateDocument) -> dict:
         conn.close()
 
 
+def _native_capture_retry(conn, document_id: int, page_index: int, source: dict, existing) -> dict | None:
+    """Current native IDs bind once; an exact replay cannot rewrite its receipt."""
+    receipt = None
+    for row in conn.execute("SELECT document_id, page_index, capture_metadata_json FROM pages "
+                            "WHERE capture_metadata_json IS NOT NULL"):
+        try:
+            metadata = parse_capture_metadata(row["capture_metadata_json"])
+        except ValueError:
+            raise HTTPException(status_code=409, detail="saved native capture metadata is invalid") from None
+        if metadata["capture_provenance"]["capture_id"] != source["capture_id"]:
+            continue
+        if (row["document_id"] != document_id or row["page_index"] != page_index
+                or metadata["capture_provenance"] != source):
+            raise HTTPException(status_code=409, detail="native capture identity is already bound differently")
+        try:
+            if existing is None or file_sha256(existing["image_path"]) != metadata["canonical_image_sha256"]:
+                raise ValueError("canonical image differs")
+            original = Path(existing["image_path"]).with_suffix(".jpg")
+            if original.exists() and file_sha256(original) != source["jpeg_sha256"]:
+                raise ValueError("native original differs")
+        except (OSError, ValueError):
+            raise HTTPException(status_code=409, detail="saved native canonical image is unavailable or changed") from None
+        receipt = metadata
+    return receipt
+
+
 @app.post("/v1/documents/{document_id}/pages", status_code=201)
 async def add_page(
     document_id: int,
+    request: Request,
     page_index: int = Form(...),
     image: UploadFile | None = File(None),
     image_rotation: int = Form(0),
@@ -457,6 +972,8 @@ async def add_page(
     ocr_text: str | None = Form(None),
     vision_text: str | None = Form(None),
     total_pages: int | None = Form(None),
+    capture_provenance: str | None = Form(None),
+    inspection_origin: str | None = Form(None),
 ) -> dict:
     """Record one photographed page or a text-only compatibility page.
 
@@ -484,22 +1001,81 @@ async def add_page(
             status_code=400,
             detail="image_rotation must be one of 0, 90, 180, or 270",
         )
+    native_source = None
+    if capture_provenance is not None:
+        try:
+            native_source = parse_capture_provenance(capture_provenance)
+        except (ValueError, UnicodeError, RecursionError):
+            raise HTTPException(status_code=400, detail="invalid capture_provenance") from None
+    elif "capture_provenance" in await request.form():
+        raise HTTPException(status_code=400, detail="empty capture_provenance")
+    if native_source is not None and not has_image:
+        raise HTTPException(status_code=400, detail="native capture_provenance requires its JPEG")
     pending_image_path: Path | None = None
+    pending_original_path: Path | None = None
     image_persisted = False
+    native_metadata = None
+    native_replay = False
     conn = db.connect()
     try:
-        doc = _doc_or_404(conn, document_id)
-
+        _doc_or_404(conn, document_id)
+        observed_existing = conn.execute(
+            "SELECT id FROM pages WHERE document_id=? AND page_index=?", (document_id, page_index)
+        ).fetchone()
         if has_image:
-            raw = await _read_upload_limited(image)
-            img = _rotate_image_for_ocr(_load_image(raw), image_rotation)
-            ph = phash_hex(img)
-            omd5 = _fallback_md5(ocr_md5(ocr_text), raw)
-            fname = f"{document_id}_{page_index}_{uuid.uuid4().hex[:8]}.png"
-            fpath: Path | None = IMAGE_DIR / fname
-            pending_image_path = fpath
-            img.convert("RGB").save(fpath, format="PNG")
-            image_path = str(fpath)
+            raw = await _read_upload_limited(image, _MAX_IMAGE_UPLOAD_BYTES)
+            # A native capture whose ID is already stored is a retry: it is checked under the lock and creates nothing.
+            stored_before = native_source is not None and conn.execute(
+                "SELECT 1 FROM pages WHERE capture_metadata_json IS NOT NULL AND instr(capture_metadata_json, ?) > 0 "
+                "LIMIT 1", (str(native_source["capture_id"]),)).fetchone() is not None
+            source_format, source_size, upright_phash, png = await run_in_threadpool(
+                functools.partial(_prepare_page_image, raw, image_rotation, encode=not stored_before))
+            if native_source is not None and (
+                    source_format != "JPEG" or native_source["jpeg_sha256"] != hashlib.sha256(raw).hexdigest()
+                    or (native_source["width"], native_source["height"]) != source_size
+                    or native_source["page_index"] != page_index
+                    or native_source["rotation_degrees"] != image_rotation):
+                raise HTTPException(status_code=400, detail="capture_provenance does not match the uploaded JPEG")
+            if png is not None:
+                fpath: Path | None = IMAGE_DIR / f"{document_id}_{page_index}_{uuid.uuid4().hex[:8]}.png"
+                # Named before they exist: whatever stops this request, the cleanup below removes them.
+                pending_image_path = fpath
+                pending_original_path = fpath.with_suffix(".jpg") if native_source is not None else None
+                await run_in_threadpool(_write_page_files, fpath, png, raw if native_source is not None else None)
+        # Bind the native ID and replacement cleanup to the same current row.
+        # Upload reads, image work and file writes finish before the write lock, with no awaits until commit.
+        conn.execute("BEGIN IMMEDIATE")
+        doc = _doc_or_404(conn, document_id)
+        existing = conn.execute(
+            "SELECT * FROM pages WHERE document_id = ? AND page_index = ?",
+            (document_id, page_index),
+        ).fetchone()
+
+        if has_image and native_source is not None:
+            native_metadata = _native_capture_retry(conn, document_id, page_index, native_source, existing)
+            native_replay = native_metadata is not None
+        if observed_existing is None and existing is not None and not native_replay:
+            raise HTTPException(status_code=409, detail=f"page_index {page_index} already exists")
+        if has_image:
+            if native_replay:
+                ph, omd5, image_path = existing["phash"], existing["ocr_md5"], existing["image_path"]
+                vision_text = existing["vision_text"]
+            else:
+                if png is None:
+                    # The stored capture went away between the look and the lock: encode and write here, as before
+                    # 2026-11-15.
+                    _, _, upright_phash, png = _prepare_page_image(raw, image_rotation)
+                    fpath = IMAGE_DIR / f"{document_id}_{page_index}_{uuid.uuid4().hex[:8]}.png"
+                    pending_image_path = fpath
+                    pending_original_path = fpath.with_suffix(".jpg") if native_source is not None else None
+                    _write_page_files(fpath, png, raw if native_source is not None else None)
+                ph = upright_phash
+                omd5 = _fallback_md5(ocr_md5(ocr_text), raw)
+                image_path = str(fpath)
+                if native_source is not None:
+                    # The file holds exactly these bytes; reading 29.7 MB back to hash it held the loop.
+                    native_metadata = {"capture_provenance": native_source,
+                                       "canonical_image_sha256": hashlib.sha256(png).hexdigest()}
         else:
             # Text-only compatibility input has no image/pHash. OCR-MD5 hashes
             # the full body + figure description for exact matching.
@@ -508,12 +1084,11 @@ async def add_page(
             omd5 = ocr_md5(dedupe_src) or hashlib.md5(dedupe_src.encode()).hexdigest()
             image_path = None
 
-        existing = conn.execute(
-            "SELECT id, image_path FROM pages "
-            "WHERE document_id = ? AND page_index = ?",
-            (document_id, page_index),
-        ).fetchone()
-        if existing is not None:
+        metadata_json = json.dumps(native_metadata, ensure_ascii=False, sort_keys=True) if native_metadata else None
+        if native_replay:
+            page_id, replaced = existing["id"], False
+            conn.commit()
+        elif existing is not None:
             # 再読取: replace this page's recognition. Frozen once a bound
             # exam session finished reading — its deck was segmented from
             # the OLD text and replacing underneath it would diverge them.
@@ -534,7 +1109,7 @@ async def add_page(
                 )
             updated = conn.execute(
                 "UPDATE pages SET image_path = ?, phash = ?, ocr_text = ?, "
-                "vision_text = ?, ocr_md5 = ?, captured_at_ms = ?, summary = NULL WHERE id = ? "
+                "vision_text = ?, ocr_md5 = ?, captured_at_ms = ?, capture_metadata_json = ?, summary = NULL WHERE id = ? "
                 "AND NOT EXISTS ("
                 "  SELECT 1 FROM exam_sessions "
                 "  WHERE document_id = ? AND status = 'reviewing'"
@@ -546,6 +1121,7 @@ async def add_page(
                     vision_text,
                     omd5,
                     captured_at_ms or None,
+                    metadata_json,
                     existing["id"],
                     document_id,
                 ),
@@ -565,6 +1141,8 @@ async def add_page(
             if existing["image_path"] and existing["image_path"] != image_path:
                 # The replaced photo must not linger on disk.
                 _unlink_best_effort(existing["image_path"])
+                if existing["capture_metadata_json"] is not None:
+                    _unlink_best_effort(Path(existing["image_path"]).with_suffix(".jpg"))
             page_id, replaced = existing["id"], True
         else:
             if doc["status"] != "open":
@@ -581,8 +1159,8 @@ async def add_page(
                 cur = conn.execute(
                     """INSERT INTO pages
                        (document_id, page_index, image_path, phash, ocr_text,
-                        vision_text, ocr_md5, captured_at_ms)
-                       SELECT ?, ?, ?, ?, ?, ?, ?, ?
+                         vision_text, ocr_md5, captured_at_ms, capture_metadata_json)
+                        SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?
                        WHERE EXISTS (
                            SELECT 1 FROM documents
                            WHERE id = ? AND status = 'open'
@@ -596,6 +1174,7 @@ async def add_page(
                         vision_text,
                         omd5,
                         captured_at_ms or None,
+                        metadata_json,
                         document_id,
                     ),
                 )
@@ -641,6 +1220,8 @@ async def add_page(
             total_pages=effective_total,
         )
 
+        diagnostic = await run_in_threadpool(register_native, document_id, page_index, inspection_origin,
+                                             request.client.host if request.client else "", not native_replay)
         return {
             "page_id": page_id,
             "document_id": document_id,
@@ -650,8 +1231,11 @@ async def add_page(
             "ocr_md5": omd5,
             "image_path": image_path,
             "image_rotation": image_rotation,
+            "capture_provenance": native_metadata["capture_provenance"] if native_metadata else None,
+            "canonical_image_sha256": native_metadata["canonical_image_sha256"] if native_metadata else None,
             "has_vision_text": bool(vision_text and vision_text.strip()),
             "scan_ack": ack,
+            "capture_inspection": registration_summary(diagnostic),
         }
     finally:
         conn.close()
@@ -660,6 +1244,80 @@ async def add_page(
         # do not retain a photo that no database row owns.
         if pending_image_path is not None and not image_persisted:
             _unlink_best_effort(pending_image_path)
+            _unlink_best_effort(pending_original_path)
+
+
+def replace_page_image(document_id: int, page_index: int, png_bytes: bytes, note: dict) -> bool:
+    """Put the image gathered from a page's clip in place of that page's stored PNG.
+
+    Only for the page the clip was cut from (the capture the page holds is the clip's) and only while the booklet still
+    takes pages; otherwise nothing changes and the answer is False. The capture's record stays, with ``note`` (used,
+    total, level_over_noise, clip_sha256) added as ``gathered`` and the canonical hash now the new PNG's. The JPEG frame
+    the page arrived as stays where it is: it is not the original of the gathered image, so it is not kept beside it,
+    where the opt-in Work JPEG delivery would take it for that.
+    """
+    with _load_image(png_bytes) as picture:
+        ph = phash_hex(picture)
+    fpath = IMAGE_DIR / f"{document_id}_{page_index}_{uuid.uuid4().hex[:8]}.png"
+    _write_page_files(fpath, png_bytes, None)  # before the write lock, as a page upload writes its files
+    superseded: str | Path = fpath  # what is removed at the end: the new file, until a row has taken it
+    conn = db.connect()
+    try:
+        # Under the finalizer's own lock: a page whose image changed while its booklet was being finalized stops the
+        # finalization with a 409, and the glasses stop on that. Finalization waits for the clips before it takes the lock.
+        with _document_finalize_mutex(document_id):
+            conn.execute("BEGIN IMMEDIATE")
+            capture, page = page_clips.open_capture(conn, document_id, page_index)
+            clip = conn.execute("SELECT capture_id FROM page_clips WHERE document_id = ? AND page_index = ? AND sha256 = ?",
+                                (document_id, page_index, note["clip_sha256"])).fetchone()
+            if page is None or clip is None or capture.get("capture_id") != clip["capture_id"]:
+                return False
+            metadata = {"capture_provenance": capture, "canonical_image_sha256": hashlib.sha256(png_bytes).hexdigest(),
+                        "gathered": note}
+            updated = conn.execute(
+                "UPDATE pages SET image_path = ?, phash = ?, capture_metadata_json = ?, summary = NULL WHERE id = ? "
+                "AND NOT EXISTS (SELECT 1 FROM exam_sessions WHERE document_id = ? AND status = 'reviewing')",
+                (str(fpath), ph, json.dumps(metadata, ensure_ascii=False, sort_keys=True), page["id"], document_id))
+            if updated.rowcount != 1:
+                return False
+            conn.commit()
+            superseded = page["image_path"]
+        return True
+    finally:
+        conn.close()
+        # ponytail: the frame's JPEG keeps its first name; a page taken again after its clip was gathered leaves that
+        # JPEG behind in the image directory. Remove it with the page if that ever adds up.
+        _unlink_best_effort(superseded)
+
+
+gather_service = GatherService(replace_page_image)
+
+
+@app.post("/v1/documents/{document_id}/pages/{page_index}/clip")
+def add_page_clip(document_id: int, page_index: int, clip: UploadFile = File(...), record: str = Form(...),
+                  capture_id: str = Form(...), sha256: str = Form(...)) -> JSONResponse:
+    """Keep the clip a recorded page was cut from, with the record the glasses wrote beside it.
+
+    The page itself came first, as one frame of this clip (``clip_frame``). 201 for a new clip, 200 for the one the
+    page already has; what is refused is listed at ``page_clips.store_clip``. A new clip wakes the gathering.
+    """
+    kept = page_clips.store_clip(document_id, page_index, capture_id, sha256, record, clip.file)
+    created = kept.pop("created")
+    if created:
+        gather_service.wake()
+    return JSONResponse(kept, status_code=201 if created else 200)
+
+
+@app.get("/v1/documents/{document_id}/clips")
+def document_clips(document_id: int) -> dict:
+    """For inspection: how far each page's clip has come."""
+    conn = db.connect()
+    try:
+        _doc_or_404(conn, document_id)
+    finally:
+        conn.close()
+    shown = ("page_index", "status", "reason", "used", "total", "level", "bytes")
+    return {"clips": [{key: row[key] for key in shown} for row in page_clips.rows(document_id)]}
 
 
 # Physical exams do not exceed this; the cap bounds the missing-index range
@@ -821,10 +1479,122 @@ def get_document_scan_status(
     }
 
 
+# 150 s until 2026-11-18. That day a twelfth page's clip, arrived 3 s before the end behind three clips of ten seconds
+# each, was gathered 165 s after it and its page went out as one frame.
+_GATHER_WAIT_S = 200.0
+
+
+def _await_gathering(document_id: int, *, booklet: bool = True) -> None:
+    """Wait for this booklet's clips that are stored or being gathered, at most ROKID_GATHER_WAIT_S seconds (200).
+
+    Past the limit the booklet goes on with the pages that are done; the others stay the one frame they arrived as and
+    the answers name them (``_ungathered_pages``). A clip that never arrived has no row and cannot be waited for. The
+    glasses' finalize call reads for four minutes (DocScanApi), so the limit has to stay under that with room for
+    the finalizing itself (a second or two on the phone). ``booklet`` False: the pages are handed to the solver as
+    they become final, the booklet as a whole is not (a page of it may yet be taken again, ``capture_check``).
+    """
+    still = page_clips.waiting(document_id)
+    left = len(still)
+    if not left:
+        _prepare_ahead(document_id, still, booklet=booklet)
+        return
+    _prepare_ahead(document_id, still)
+    limit = float(os.environ.get("ROKID_GATHER_WAIT_S") or _GATHER_WAIT_S)
+    started = time.monotonic()
+    while left and time.monotonic() - started < limit:
+        time.sleep(0.5)
+        now = page_clips.waiting(document_id)
+        if now and now != still:
+            _prepare_ahead(document_id, now)  # a page whose clip was settled meanwhile: its image is final
+        still, left = now, len(now)
+    print(json.dumps({"event": "gather_wait", "document_id": document_id, "seconds": round(time.monotonic() - started, 1),
+                      "left": left}), flush=True)
+    # Whatever is still waiting stays the frame it arrived as (the gathering finds the booklet closed).
+    _prepare_ahead(document_id, set() if booklet else page_clips.waiting(document_id), booklet=booklet)
+
+
+def _prepare_ahead(document_id: int, waiting: set[int], *, booklet: bool = False) -> None:
+    """Hand the booklet's solver the pages whose images are final (every page but ``waiting``), for it to do with
+    them what the answers would otherwise wait for (``CodexCliSolver.prepare``); ``booklet`` says they are all of it.
+
+    The wearer has ended the capture: the glasses ask for the booklet to be finalized only then, and nothing is
+    handed over before. Only while the booklet still takes pages (a finalize call sent again hands nothing over), and
+    only to a solver that prepares. Whatever goes wrong here leaves the booklet as it was answered before."""
+    try:
+        prepare = getattr(get_solver(os.environ.get("ROKID_SOLVER")), "prepare", None)
+        if prepare is None:
+            return
+        with closing(db.connect()) as conn:
+            document = conn.execute("SELECT status FROM documents WHERE id = ?", (document_id,)).fetchone()
+            if document is None or document["status"] != "open":
+                return
+            rows = conn.execute("SELECT page_index, image_path, capture_metadata_json FROM pages WHERE document_id = ? "
+                                "ORDER BY page_index", (document_id,)).fetchall()
+        pages = [{"page_number": row["page_index"] + 1, "image_path": row["image_path"],
+                  "image_sha256": file_sha256(row["image_path"]),
+                  **(parse_capture_metadata(row["capture_metadata_json"]) or {})}
+                 for row in rows if row["page_index"] not in waiting and row["image_path"]]
+        if pages:
+            prepare(pages, booklet=booklet)
+    except Exception as error:  # noqa: BLE001 - the booklet is then prepared when its answers are asked for
+        print(json.dumps({"event": "prepare_ahead_failed", "document_id": document_id, "type": type(error).__name__}),
+              flush=True)
+
+
+# A recorded page gathered from fewer frames than this is taken again. The glasses record until 60 still frames have
+# counted (ClipCamera.Options.targetFrames) and take a clip as enough from 40. Of the recorded pages on record up to
+# 2026-11-19 whose clip failed or gave fewer than 40 frames (14), 12 were not read (tests/test_capture_check.py).
+# ponytail: one number for one frame target; if the glasses' target changes, this goes with it.
+_CHECK_MIN_USED = 40
+
+
+@app.post("/v1/documents/{document_id}/capture-check")
+def capture_check(document_id: int) -> dict:
+    """The pages of a booklet to take again, before it is finalized and before anything is asked of a model.
+
+    The glasses ask when the wearer has ended the capture. The call waits for the booklet's clips as the finalize
+    call does (the same limit) and then names, by their numbers from 1, the recorded pages that are not whole: a clip
+    that failed or never came (the page is the one frame it arrived as) and a page gathered from too few frames. The
+    glasses take those again under the same page numbers and finalize after that. A booklet that takes no more pages
+    is asked for nothing. What a page's picture is like (print cut by the frame, blur) is not judged here: no measure
+    taken from the pages on record told the read ones from the others.
+    """
+    with closing(db.connect()) as conn:
+        document = conn.execute("SELECT status FROM documents WHERE id = ?", (document_id,)).fetchone()
+        if document is None:
+            raise HTTPException(status_code=404, detail="document not found")
+    retake: list[int] = []
+    if document["status"] == "open":
+        _await_gathering(document_id, booklet=False)
+        # The desk check only (the stand-in solver): the answer is held back for as long as the phone's gathering
+        # takes in a use, 60 to 83 s on 2026-11-20. On a PC the clips are gathered in seconds, the glasses were still
+        # awake when the answer came, and a camera the system refuses to glasses asleep for over a minute was never
+        # met on the desk (the wearer met it: "restart the app").
+        if os.environ.get("ROKID_SOLVER") == "recorded":
+            time.sleep(min(180.0, max(0.0, float(os.environ.get("ROKID_CHECK_HOLD_S") or 0))))
+        least = int(os.environ.get("ROKID_CHECK_MIN_USED") or _CHECK_MIN_USED)
+        with closing(db.connect()) as conn:
+            few = {row["page_index"] + 1 for row in page_clips.rows(document_id)
+                   if row["status"] == "done" and (row["used"] or 0) < least}
+            retake = sorted(few | set(_ungathered_pages(conn, document_id)))
+        if not retake:
+            _prepare_ahead(document_id, page_clips.waiting(document_id), booklet=True)
+    with closing(db.connect()) as conn:
+        pages = conn.execute("SELECT COUNT(*) FROM pages WHERE document_id = ?", (document_id,)).fetchone()[0]
+    print(json.dumps({"event": "capture_check", "document_id": document_id, "pages": pages, "retake": retake}), flush=True)
+    return {"document_id": document_id, "pages": pages, "retake": retake}
+
+
 @app.post("/v1/documents/{document_id}/finalize")
 def finalize_document(document_id: int) -> dict:
+    # Before the pages are read, and before the lock: the gathering puts a page's image in place under that lock
+    # (replace_page_image), so that once the pages are being read here none of them changes any more.
+    _await_gathering(document_id)
     with _document_finalize_mutex(document_id):
-        return _finalize_document_once(document_id)
+        result = _finalize_document_once(document_id)
+    # After the lock, on its own thread and connection: the sweep takes the database's write lock itself.
+    threading.Thread(target=retention.sweep, name="retention", daemon=True).start()
+    return result
 
 
 def _finalize_document_once(document_id: int) -> dict:
@@ -1018,7 +1788,7 @@ async def match_page(
         _doc_or_404(conn, document_id)
         raw_q_md5: str | None = None
         if has_image:
-            raw = await _read_upload_limited(image)
+            raw = await _read_upload_limited(image, _MAX_IMAGE_UPLOAD_BYTES)
             img = _load_image(raw)
             q_phash: str | None = phash_hex(img)
             # Historical compat rule: body text MD5, falling back to the
@@ -1191,7 +1961,7 @@ class CreateExamSession(BaseModel):
 
 
 # Valid enum values for the document page-move exam.
-_EXAM_TYPES = {"written", "listening"}
+_EXAM_TYPES = {"written", "listening", "mixed"}
 _ANSWER_FORMATS = {"mark", "written"}
 
 # Answer-format instruction folded into the solver context so a real model
@@ -1427,8 +2197,8 @@ def create_exam_session(payload: CreateExamSession) -> dict:
             _require_dense_page_indexes(conn, payload.document_id)
         cur = conn.execute(
             "INSERT INTO exam_sessions "
-            "(mode, voice_enabled, subject_hint, document_id, exam_type, answer_format) "
-            "VALUES (?, ?, ?, ?, ?, ?)",
+            "(mode, voice_enabled, subject_hint, document_id, exam_type, answer_format, analysis_stage) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?)",
             (
                 payload.mode,
                 int(payload.voice_enabled),
@@ -1436,6 +2206,7 @@ def create_exam_session(payload: CreateExamSession) -> dict:
                 payload.document_id,
                 payload.exam_type,
                 payload.answer_format,
+                "reading" if payload.exam_type == "mixed" else "single",
             ),
         )
         conn.commit()
@@ -1446,6 +2217,7 @@ def create_exam_session(payload: CreateExamSession) -> dict:
             "subject_hint": payload.subject_hint,
             "document_id": payload.document_id,
             "exam_type": payload.exam_type,
+            "analysis_stage": "reading" if payload.exam_type == "mixed" else "single",
             "answer_format": payload.answer_format,
             "current_page_index": 0,
             "total_pages": _exam_total_pages(conn, payload.document_id),
@@ -1505,7 +2277,7 @@ async def add_question(
         # IMAGE_DIR (no questions row would ever own it).
         fpath: Path | None = None
         if has_image:
-            raw = await _read_upload_limited(image)
+            raw = await _read_upload_limited(image, _MAX_IMAGE_UPLOAD_BYTES)
             img = _load_image(raw)
             fname = f"q_{session_id}_{uuid.uuid4().hex[:8]}.png"
             fpath = IMAGE_DIR / fname
@@ -1750,6 +2522,7 @@ def get_exam_session(session_id: int) -> dict:
             "phase": _session_phase(session),
             "document_id": session["document_id"],
             "exam_type": session["exam_type"],
+            "analysis_stage": session["analysis_stage"],
             "answer_format": session["answer_format"],
             "current_page_index": session["current_page_index"],
             "total_pages": _exam_total_pages(conn, session["document_id"]),
@@ -1946,50 +2719,7 @@ def exam_paste_prompt(session_id: int) -> dict:
             "text": text,
             "url": "https://chatgpt.com/?q=" + urllib.parse.quote(text, safe=""),
             "has_image": bool(page_row["image_path"]),
-            # The phone path's missing half: the prompt could be pasted, but the
-            # pages could not be attached one photo at a time by hand. One PDF
-            # of the whole captured document can.
-            "pages_pdf_url": f"/v1/exam-sessions/{session_id}/pages.pdf",
         }
-    finally:
-        conn.close()
-
-
-@app.get("/v1/exam-sessions/{session_id}/pages.pdf")
-def exam_pages_pdf(session_id: int) -> Response:
-    """Every captured page of this session's document as ONE PDF.
-
-    For the phone path: the operator opens ``paste-prompt``'s ``url`` in the
-    ChatGPT app, attaches this single file once, and asks each question against
-    it. Attaching a dozen photos by hand is the step that does not survive a
-    real session; attaching one file does. Pages keep their reading order.
-
-    Text-only pages are skipped -- they carry nothing an image would add. The
-    solver path is unchanged: it attaches the page images themselves unless
-    ROKID_CHATGPT_BUNDLE_PDF is set.
-    """
-    conn = db.connect()
-    try:
-        session = _exam_session_or_404(conn, session_id)
-        doc_id = _require_document_exam(session)
-        rows = conn.execute(
-            "SELECT image_path FROM pages WHERE document_id = ? ORDER BY page_index",
-            (doc_id,),
-        ).fetchall()
-        images = [
-            Path(row["image_path"]).read_bytes()
-            for row in rows
-            if row["image_path"] and Path(row["image_path"]).exists()
-        ]
-        if not images:
-            raise HTTPException(status_code=404, detail="no page images to bundle")
-        return Response(
-            content=images_to_pdf(images),
-            media_type="application/pdf",
-            headers={
-                "Content-Disposition": f'inline; filename="session{session_id}-pages.pdf"'
-            },
-        )
     finally:
         conn.close()
 
@@ -2124,16 +2854,22 @@ class ExamMode(BaseModel):
 
 @app.post("/v1/exam-sessions/{session_id}/mode")
 def exam_set_mode(session_id: int, payload: ExamMode) -> dict:
-    """Switch 筆記(written) ⇄ リスニング(listening). Doable from glasses or phone."""
+    """Switch exam type; a mixed analysis keeps its original mode."""
     if payload.exam_type not in _EXAM_TYPES:
         raise HTTPException(status_code=400, detail=f"exam_type must be one of {_EXAM_TYPES}")
     conn = db.connect()
     try:
         session = _exam_session_or_404(conn, session_id)
-        conn.execute(
-            "UPDATE exam_sessions SET exam_type = ? WHERE id = ?",
-            (payload.exam_type, session_id),
+        if _session_phase(session) == "reviewing" and "mixed" in (session["exam_type"], payload.exam_type):
+            raise HTTPException(status_code=409, detail="a mixed analysis keeps its original mode")
+        changed = conn.execute(
+            "UPDATE exam_sessions SET exam_type = ?, analysis_stage = ? WHERE id = ? "
+            "AND (status != 'reviewing' OR (exam_type != 'mixed' AND ? != 'mixed'))",
+            (payload.exam_type, "reading" if payload.exam_type == "mixed" else "single", session_id,
+             payload.exam_type),
         )
+        if changed.rowcount != 1:
+            raise HTTPException(status_code=409, detail="a mixed analysis keeps its original mode")
         conn.commit()
         return {
             "session_id": session_id,
@@ -2153,8 +2889,11 @@ def exam_set_mode(session_id: int, payload: ExamMode) -> dict:
 
 @app.get("/v1/listening-ready")
 def listening_ready() -> dict:
+    from .listening import requires_transcript
     from .local_asr import local_asr_settings
 
+    if not requires_transcript():
+        return {"ready": True, "asr": "disabled", "sample_rate": 16000}
     try:
         local_asr_settings()
     except ValueError as error:
@@ -2167,13 +2906,14 @@ async def document_audio_chunk(
     document_id: int, sequence: int = Form(...), start_sample: int = Form(...),
     captured_at_ms: int = Form(...), audio: UploadFile = File(...),
 ) -> dict:
-    from .listening import store_chunk
+    from .listening import requires_transcript, store_chunk
 
     with db.connect() as conn:
         _doc_or_404(conn, document_id)
     raw = await _read_upload_limited(audio)
     try:
-        result = await run_in_threadpool(store_chunk, document_id, sequence, start_sample, captured_at_ms, raw)
+        result = await run_in_threadpool(store_chunk, document_id, sequence, start_sample, captured_at_ms, raw,
+                                         transcribe=requires_transcript())
         # Transcript contents remain on the server; the glasses need only progress/timing.
         return {"sequence": result["sequence"], "samples": result["samples"],
                 "asr_seconds": result["asr_seconds"], "real_time_factor": result["real_time_factor"]}
@@ -2201,23 +2941,29 @@ def document_audio_complete(document_id: int, payload: CompleteRecording) -> dic
 
 @app.post("/v1/exam-sessions/{session_id}/document-audio")
 def exam_document_audio(session_id: int) -> dict:
-    from .listening import recording_transcript
+    from .listening import recording_transcript, requires_transcript
 
     with db.connect() as conn:
         session = _exam_session_or_404(conn, session_id)
         doc_id = _require_document_exam(session)
-        if session["exam_type"] != "listening":
+        mixed = session["exam_type"] == "mixed"
+        if session["exam_type"] not in ("listening", "mixed"):
             raise HTTPException(status_code=409, detail="listening session required")
         try:
-            path, text = recording_transcript(doc_id)
+            path, text = recording_transcript(doc_id, require_transcript=not mixed and requires_transcript(),
+                                              verify_original=mixed)
         except ValueError as error:
             raise HTTPException(status_code=409, detail=str(error)) from error
+        condition = ("(audio_path IS NULL OR (audio_path = ? AND transcript = ?))" if mixed else
+                     "(status != 'reviewing' OR (audio_path = ? AND transcript = ?))")
         updated = conn.execute(
-            "UPDATE exam_sessions SET audio_path = ?, transcript = ? WHERE id = ? "
-            "AND (status != 'reviewing' OR (audio_path = ? AND transcript = ?))",
+            "UPDATE exam_sessions SET audio_path = ?, transcript = ? WHERE id = ? AND " + condition,
             (path, text, session_id, path, text))
         if updated.rowcount != 1:
             raise HTTPException(status_code=409, detail="reviewed audio is immutable; start a new document")
+        conn.commit()
+        if mixed:
+            _resume_answers(conn, _exam_session_or_404(conn, session_id))
         return {"status": "complete", "audio_stored": True}
 
 
@@ -2227,16 +2973,20 @@ async def exam_upload_audio(
     audio: UploadFile | None = File(None),
     transcript: str | None = Form(None),
 ) -> dict:
-    """Listening mode: record the audio on the spot and store its transcript.
+    """Retain original audio; the browser route does not transcribe it locally.
 
-    Saves the uploaded recording to data/audio/ and transcribes it via the
+    The non-browser compatibility route transcribes the saved recording via the
     configured ROKID_TRANSCRIBER (openai|gemini). With no transcriber (or on
     failure/offline) the client-provided ``transcript`` is stored as-is, so
     listening works without any ASR credential. Either ``audio`` or
     ``transcript`` must be supplied.
     """
     from .transcribe import transcribe_audio
+    from .listening import requires_transcript
 
+    transcribe = requires_transcript()
+    if not transcribe and (audio is None or not getattr(audio, "filename", None)):
+        raise HTTPException(status_code=400, detail="original listening audio required")
     if (audio is None or not getattr(audio, "filename", None)) and not (
         transcript and transcript.strip()
     ):
@@ -2261,7 +3011,7 @@ async def exam_upload_audio(
             fpath.write_bytes(raw)
             audio_path = str(fpath)
 
-        text = transcribe_audio(audio_path, provided_transcript=transcript)
+        text = transcribe_audio(audio_path, provided_transcript=transcript) if transcribe else ""
         updated = conn.execute(
             "UPDATE exam_sessions SET audio_path = ?, transcript = ? WHERE id = ? AND status != 'reviewing' "
             "AND audio_path IS ? AND transcript IS ?",
@@ -2304,7 +3054,8 @@ def _deck_question_rows(conn, session_id: int) -> list:
         # re-sorted by page: a problem's deck index must stay stable once
         # assigned, or problem_index addressing would silently shift when the
         # onboard ingest appends a problem the heuristic missed. Late
-        # additions therefore go to the end of the deck.
+        # additions therefore go to the end of the deck. The one exception
+        # is a row that names the row it stands behind (``after``, below).
         "SELECT * FROM questions WHERE session_id = ? ORDER BY id",
         (session_id,),
     ).fetchall()
@@ -2315,8 +3066,11 @@ def _deck_question_rows(conn, session_id: int) -> list:
         except (ValueError, TypeError):
             meta = None
         if isinstance(meta, dict) and (meta.get("deck") or "page_indexes" in meta):
-            deck_rows.append(r)
-    return deck_rows
+            # ``after``: a question the comparison of two reads added behind the row of that id (_save_compared).
+            # It stands there, not at the end, and no other row's id or place changes for it.
+            after = meta.get("after")
+            deck_rows.append(((after, 1) if type(after) is int else (r["id"], 0), r))
+    return [r for _, r in sorted(deck_rows, key=lambda placed: placed[0])]
 
 
 def _latest_solution_row(conn, question_id: int):
@@ -2350,8 +3104,9 @@ def _exam_deck(conn, session_id: int) -> list[dict]:
     return deck
 
 
-# 大問 headings, as the segmenter emits them (app/layout.py:64).
-_GROUP_NO_RE = re.compile(r"^(?:大問\s*[0-9０-９]+|第\s*[0-9０-９]+\s*問)")
+# 大問 headings, as the segmenter emits them (app/layout.py:64) and as the model
+# copies them from a 国語 booklet ("第一問", run 4b, 2026-09-30).
+_GROUP_NO_RE = re.compile(r"^(?:大問\s*[0-9０-９一二三四五六七八九十]+|第\s*[0-9０-９一二三四五六七八九十]+\s*問)")
 
 
 def _answer_groups(conn, session_id: int) -> list[dict]:
@@ -2412,11 +3167,7 @@ def _page_image_paths(conn, doc_id: int, page_indexes: list[int] | None) -> list
 
 
 def _document_image_paths(conn, doc_id: int) -> list[str]:
-    """Every page image of the document, in reading order.
-
-    The browser route attaches the whole booklet once as a single PDF, so the
-    question text does not have to be retyped into every message.
-    """
+    """Every page image of the document, in reading order."""
     rows = conn.execute(
         "SELECT image_path FROM pages WHERE document_id = ? ORDER BY page_index",
         (doc_id,),
@@ -2424,21 +3175,63 @@ def _document_image_paths(conn, doc_id: int) -> list[str]:
     return [r["image_path"] for r in rows if r["image_path"]]
 
 
-def _document_source_pages(conn, doc_id: int, session_id: int) -> list[dict]:
+def _document_source_pages(conn, doc_id: int, session_id: int, *, work_originals: bool | None = None) -> list[dict]:
+    if work_originals is None:
+        work_originals = os.environ.get("ROKID_SOLVER", "").strip() == "chatgpt-work"
+    work_store = configured_work_store()
+    jobs = work_store.session_jobs(session_id) if work_originals and work_store.path.is_file() else []
+    sealed = {source["page_number"]: source for source in jobs[0]["sources"]
+              if "page_number" in source} if jobs else {}
     refs: dict[int, list[str]] = {}
     for question in _deck_question_rows(conn, session_id):
         for index in _row_page_indexes(question):
             refs.setdefault(index, []).append(f"q{question['id']}")
-    return [
-        {"page_number": row["page_index"] + 1, "image_path": row["image_path"],
-         "image_sha256": file_sha256(row["image_path"]),
+    pages = []
+    for row in conn.execute("SELECT * FROM pages WHERE document_id = ? ORDER BY page_index", (doc_id,)):
+        sha = file_sha256(row["image_path"])
+        metadata = parse_capture_metadata(row["capture_metadata_json"])
+        if metadata is not None and (metadata["canonical_image_sha256"] != sha
+                or metadata["capture_provenance"]["page_index"] != row["page_index"]):
+            raise ValueError("saved native capture does not match its canonical page")
+        number, image_path, evidence = row["page_index"] + 1, row["image_path"], {}
+        prior = sealed.get(number)
+        use_jpeg = (prior["mime_type"] == "image/jpeg" if prior else
+                    (not jobs and work_originals
+                     and os.environ.get("ROKID_WORK_ORIGINAL_JPEG", "0") == "1"))
+        if use_jpeg and metadata is not None:
+            original_path = Path(image_path).with_suffix(".jpg")
+            if prior or original_path.is_file():
+                raw = (work_store.read_source(jobs[0]["job_id"], prior["source_id"])[0]
+                       if prior else original_path.read_bytes())
+                native = metadata["capture_provenance"]
+                original_sha = hashlib.sha256(raw).hexdigest()
+                if original_sha != native["jpeg_sha256"]:
+                    raise ValueError("saved original JPEG does not match its native capture")
+                if prior:
+                    if (prior.get("capture_provenance") != native
+                            or prior.get("canonical_image_sha256") != sha
+                            or prior["sha256"] != original_sha):
+                        raise ValueError("sealed original JPEG does not match its canonical page")
+                    # These pixels were checked before sealing. Both byte hashes
+                    # still match, so the immutable evidence remains applicable.
+                    evidence = {field: prior[field] for field in JPEG_PIXEL_FIELDS}
+                else:
+                    evidence = jpeg_pixel_evidence(raw, native["rotation_degrees"])
+                    if (evidence["width"], evidence["height"]) != (native["width"], native["height"]):
+                        raise ValueError("saved original JPEG dimensions differ")
+                    with Image.open(image_path) as canonical, canonical.convert("RGB") as rgb:
+                        if ((rgb.width, rgb.height) != (evidence["upright_width"], evidence["upright_height"])
+                                or hashlib.sha256(rgb.tobytes()).hexdigest() != evidence["upright_rgb_sha256"]):
+                            raise ValueError("original JPEG pixels do not match the canonical page")
+                image_path, sha = str(original_path), original_sha
+        pages.append({"page_number": number, "image_path": image_path,
+         "image_sha256": sha,
          "ocr_text": row["ocr_text"] or "", "vision_text": row["vision_text"] or "",
          "question_ids": refs.get(row["page_index"], []),
-         "captured_at": row["captured_at_ms"] or "unknown; server received at " + row["created_at"]}
-        for row in conn.execute(
-            "SELECT * FROM pages WHERE document_id = ? ORDER BY page_index", (doc_id,)
-        )
-    ]
+         "captured_at": row["captured_at_ms"] or "unknown; server received at " + row["created_at"],
+         **(metadata or {}), **evidence,
+         **({"_work_source_job_id": jobs[0]["job_id"]} if prior else {})})
+    return pages
 
 
 def _group_page_indexes(conn, session_id: int) -> dict[int, list[int]]:
@@ -2470,25 +3263,394 @@ def _solve_failure(row) -> dict:
         return {}
 
 
-def _record_solve_failure(conn, row, error: Exception) -> None:
-    # Keep only a fixed code, never a provider exception containing source or keys.
+class AnswerMissing(ValueError):
+    """The one reply never answered a 解答番号 the booklet prints."""
+
+
+class WorkCannotStandIn(ChatGptWebError):
+    """Work, behind another primary, could not take this booklet and holds nothing of it. Nothing was sent, and
+    the next route takes the booklet at once (_stand_in_failure)."""
+
+
+_FAILURE_CODES = (
+    (AnswerMissing, "answer_missing"),
+    (WorkCannotStandIn, "not_sent"),
+    (WorkReadabilityRejected, "image_review_rejected"),
+    (WorkBrowserResultRejected, "work_result_rejected"),
+    *FAILURE_CODES,  # the browser routes' own, which a failure's snapshot is named by too (chatgpt_web)
+)
+# Nothing was sent for these, so the server tries again on its own (see
+# _resume_answers) and the glasses keep waiting instead of showing a dead end,
+# until RESUME_LIMIT batches have failed the same way.
+_RETRYING_ISSUES = {
+    "not_sent": "ChatGPTへ送れませんでした。自動で再試行します",
+    "authentication_failed": "ChatGPTのログイン確認待ちです。資料は保持しています",
+    "browser_unavailable": "ブラウザに未接続です。復旧後に自動で再試行します",
+    "attachment_failed": "画像・原音を添付できませんでした。自動で再試行します",
+    "model_mismatch": "指定モデルの確認待ちです。資料は保持しています",
+    "browser_busy": "別の解析がブラウザを使用中です。自動で再試行します",
+    "browser_blocked": "前の送信の結果確認待ちです。自動で再試行します",
+}
+# The same failures once the retries have run out: said plainly, not waited on.
+_GAVE_UP_ISSUES = {
+    "not_sent": "ChatGPTへ送れませんでした。ブラウザを確認して読取完了をやり直してください",
+    "authentication_failed": "ChatGPTの認証に失敗しました。本人のログインを確認してください",
+    "browser_unavailable": "ブラウザに接続できませんでした。資料は保持しています",
+    "attachment_failed": "画像・原音の添付に失敗しました。資料は保持しています",
+    "model_mismatch": "指定モデルとWeb画面の選択が一致しません。送信していません",
+    "browser_busy": "ブラウザが使用中のままです。送信していません",
+    "browser_blocked": "前の送信の結果確認待ちです。確認後に読取完了をやり直してください",
+}
+# Final at once, like the upload window's refusal whose class it shares (ChatGptWebUploadRepeated): the next try
+# would upload the same files again. Its own sentence, because the window's counts say nothing true about it.
+_UPLOAD_REPEATED_ISSUE = (f"同じ添付を{UPLOAD_ROUNDS}回アップロードしましたが送信できませんでした。"
+                          "これ以上はアップロードしません")
+# Batches a session may fail without sending before it stops resuming. Each
+# batch is PRESEND_TRIES tries, so three are at least half an hour.
+RESUME_LIMIT = 3
+
+
+def _failure_count(row) -> int:
+    try:
+        return max(0, int(json.loads(row["structure_json"] or "{}").get("solve_failures", 0)))
+    except (ValueError, TypeError, AttributeError):
+        return 0
+
+
+def _work_recovery_job_id(row) -> str | None:
+    failure = _solve_failure(row)
+    job_id = failure.get("work_job_id")
+    if ("chatgpt-work" in _booklet_routes()
+            and failure.get("code") == "browser_outcome_unknown"
+            and isinstance(job_id, str) and re.fullmatch(r"[a-f0-9]{64}", job_id)):
+        return job_id
+    return None
+
+
+def _retrying(row) -> bool:
+    failure = _solve_failure(row)
+    # An uncertain Work send is read back, never sent again, and that has an end too: after RESUME_LIMIT
+    # read-backs that found no reply the failure is final, so the glasses wake once and show its sentence.
+    read_backs = failure.get("recoveries")
+    recovering = bool(_work_recovery_job_id(row)) and not (type(read_backs) is int and read_backs >= RESUME_LIMIT)
+    return recovering or bool(failure.get("next_route")) or (
+        failure.get("code") in _RETRYING_ISSUES and _failure_count(row) < RESUME_LIMIT)
+
+
+def _booklet_routes() -> list[str]:
+    """ROKID_SOLVER, then the routes that take the same booklet when it cannot answer.
+
+    No PC is at the venue and the phone is not touched, so a route that stops
+    must not end the subject. The operator's order (2026-11-16): the Codex CLI,
+    then Work when the CLI cannot be used for some other cause, then Chat
+    (first model position, Extra High verified before sending) when the usage
+    has run out. ROKID_SOLVER_FALLBACKS overrides the order; an empty value
+    disables switching.
+    """
+    primary = (os.environ.get("ROKID_SOLVER") or "").strip()
+    default = {"codex-cli": "chatgpt-work,chatgpt-web", "chatgpt-work": "chatgpt-web"}.get(primary, "")
+    names = [primary, *(name.strip() for name in os.environ.get("ROKID_SOLVER_FALLBACKS", default).split(","))]
+    return list(dict.fromkeys(name for name in names if name and (name == primary or has_booklet_route(name))))
+
+
+# One usage allowance: a limit one of these met is a limit the other would meet with the same booklet.
+_SHARED_ALLOWANCE = frozenset({"codex-cli", "chatgpt-work"})
+
+
+def _is_work(route: str | None = None) -> bool:
+    """Whether Work's sealed job and input fence apply: Work is the primary, or it is this attempt's route."""
+    return "chatgpt-work" in ((os.environ.get("ROKID_SOLVER") or "").strip(), route)
+
+
+def _session_routes(session_id: int | None) -> list[str]:
+    """The booklet routes this session can use. Work behind another primary needs the wearer's registered
+    generation; a session without one goes past it (as its primary, Work waits for the binding instead)."""
+    routes = _booklet_routes()
+    if session_id is not None and "chatgpt-work" in routes[1:]:
+        try:
+            work_binding(session_id)
+        except WorkConflict:
+            routes.remove("chatgpt-work")
+    return routes
+
+
+_route_check_lock = threading.Lock()
+
+
+def last_route_check() -> dict | None:
+    """The kept result of the last check before use; None when none was made or it cannot be read."""
+    try:
+        return json.loads((Path(config.DATA_DIR) / "route-check.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+
+
+def run_route_check(*, deep: bool = False) -> dict:
+    """Try every booklet route as it stands, in the order a booklet would use them, and keep the result.
+
+    Until 2026-11-15 nothing said a route had stopped (sign-in expired, usage limit, a changed provider) before a
+    booklet had been photographed and sent. What trying means is the route's own ``check()``: the Codex CLI makes one
+    small real request, the others only look at readiness (``real`` says which). ``ok`` is true when any route passed,
+    since a booklet moves to the next route. Only fixed codes are kept, never the provider's words; where a failure
+    was raised goes to the log.
+
+    ``deep`` also makes a route that has a ``check_deep()`` send: the Chat route sends one small real message
+    through the page, as a booklet's message goes (chatgpt_web). Looking at it had passed every change of the live
+    page that stopped it on 2026-11-14 and 11/16. Work has none: a Work task draws on the allowance the CLI draws
+    on, so its ``real`` stays false.
+    """
+    from .solvers.registry import _registry as solver_registry
+
+    with _route_check_lock:
+        routes = []
+        for name in _booklet_routes():
+            started, code, solver, deeper, used = time.monotonic(), "ok", None, None, {}
+            try:
+                if name not in solver_registry:
+                    raise LookupError("no such route")
+                solver = solver_registry.get(name)
+                deeper = getattr(solver, "check_deep", None) if deep else None
+                told = (deeper or solver.check)()
+                # How much of its allowance a route has used, where its check can tell: numbers only.
+                usage = told.get("usage") if isinstance(told, dict) else None
+                used = {key: usage[key] for key in ("used_percent", "window_minutes", "resets_at")
+                        if isinstance(usage, dict) and isinstance(usage.get(key), (int, float))
+                        and not isinstance(usage.get(key), bool)}
+            except Exception as error:  # noqa: BLE001 - a check reports; it never raises
+                code = next((code for kind, code in _FAILURE_CODES if isinstance(error, kind)), "provider_unavailable")
+                raised = traceback.extract_tb(error.__traceback__)[-1] if error.__traceback__ else None
+                print(json.dumps({"event": "route_check_failure", "route": name, "code": code, "type": type(error).__name__,
+                                  "at": f"{Path(raised.filename).name}:{raised.lineno}:{raised.name}" if raised else None}),
+                      flush=True)
+            routes.append({"name": name, "ok": code == "ok", "code": code,
+                           "real": bool(deeper or getattr(solver, "check_sends", False)),
+                           "seconds": round(time.monotonic() - started, 1), **({"usage": used} if used else {})})
+        result = {"checked_at": int(time.time()), "ok": any(route["ok"] for route in routes), "routes": routes}
+        # When a check last sent through the browser. Kept apart: a shallow check must not put the deep one off.
+        deep_at = result["checked_at"] if deep else (last_route_check() or {}).get("deep_checked_at")
+        if isinstance(deep_at, (int, float)) and not isinstance(deep_at, bool):
+            result["deep_checked_at"] = deep_at
+        path = Path(config.DATA_DIR) / "route-check.json"
+        temporary = path.with_suffix(".tmp")
+        temporary.write_text(json.dumps(result), encoding="utf-8")
+        os.replace(temporary, path)
+        return result
+
+
+def route_check_due(*, now: float, interval: float, deep: bool = False) -> bool:
+    """Whether a check is due; ``deep`` asks by the last check that sent through the browser.
+
+    Until 2026-11-17 one time decided both. Any shallow check rewrote it, the glasses' chooser asks for one whenever
+    the kept result is over thirty minutes old, and so the daily deep check was never due on a day the glasses
+    were used."""
+    last = last_route_check()
+    at = (last or {}).get("deep_checked_at" if deep else "checked_at", 0)
+    return interval > 0 and (last is None or now - (at if isinstance(at, (int, float)) else 0) >= interval)
+
+
+def _update_codex() -> None:
+    """One attempt to bring the Codex CLI to its newest stable release, when the host is set to keep it there
+    (ROKID_CODEX_AUTO_UPDATE=1) and the night's hours have come (app/codex_update.py). Never raises: the thread
+    that calls it also checks the routes every day."""
+    if os.environ.get("ROKID_CODEX_AUTO_UPDATE") != "1" or not codex_update.due(time.time()):
+        return
+    try:
+        from .solvers import codex_cli
+
+        result = codex_update.update(command=codex_cli._command(),
+                                     verify=lambda binary: codex_cli.CodexCliSolver.verify([binary]))
+        print(json.dumps({"event": "codex_update", **result}), flush=True)
+        if result.get("result") == "updated":
+            run_route_check()  # what the chooser shows is of the release now in use
+    except Exception as error:  # noqa: BLE001
+        print(json.dumps({"event": "codex_update_failed", "type": type(error).__name__}), flush=True)
+
+
+def _route_check_daily(stopping: threading.Event) -> None:
+    """Once a day, so a route that stopped is known before the day of use (ROKID_ROUTE_CHECK_INTERVAL_S; 0 is off).
+
+    How long the CLI's sign-in lasts unattended is not known; this is also what measures it.
+
+    The browser routes are only looked at unless ROKID_ROUTE_CHECK_DEEP=1: a message a day sent from the operator's
+    account with no one there is the operator's decision.
+    """
+    interval = float(os.environ.get("ROKID_ROUTE_CHECK_INTERVAL_S") or 86400)
+    while interval > 0 and not stopping.wait(300):
+        _update_codex()
+        deep = os.environ.get("ROKID_ROUTE_CHECK_DEEP") == "1"
+        if _booklet_routes() and route_check_due(now=time.time(), interval=interval, deep=deep):
+            run_route_check(deep=deep)
+
+
+@app.post("/v1/route-check")
+def route_check(deep: bool = False) -> dict:
+    return run_route_check(deep=deep)
+
+
+def last_route_failure() -> dict | None:
+    """When a browser route last failed on the page and with which code; None when no failure is kept."""
+    newest = next(iter(recent_failures()), None)
+    return None if newest is None else {"time": newest.get("time"), "code": newest.get("code")}
+
+
+@app.get("/v1/route-check/failures")
+def route_check_failures() -> dict:
+    """What the page's structure was at the browser routes' last failures, newest first (chatgpt_web.record_failure)."""
+    return {"failures": recent_failures()}
+
+
+def _closed_routes(rows) -> set[str]:
+    closed: set[str] = set()
+    for row in rows:
+        try:
+            closed |= set(json.loads(row["structure_json"] or "{}").get("closed_routes", []))
+        except (ValueError, TypeError, AttributeError):
+            pass
+    return closed
+
+
+def _route_closed_count(conn, session_id: int) -> int:
+    return len(_closed_routes(_deck_question_rows(conn, session_id)))
+
+
+def _booklet_route(conn, session_id: int) -> tuple[str, bool]:
+    """(route for this attempt, whether a later route may take over).
+
+    Read from the deck, so a restart returns to the same route instead of
+    sending to the limited one again. A stage already answered pins its route:
+    the recording goes to the chat that holds the images.
+    """
+    routes = _session_routes(session_id)
+    rows = _deck_question_rows(conn, session_id)
+    for row in rows:
+        solution = _latest_solution_row(conn, row["id"])
+        # Pinned by what answered, not by today's configuration: a fallback
+        # disabled after the reading stage still holds the images.
+        if solution is not None and (solution["solver_name"] in routes
+                                     or has_booklet_route(solution["solver_name"] or "")):
+            return solution["solver_name"], False
+    closed = _closed_routes(rows)
+    route = next((name for name in routes if name not in closed), routes[0] if routes else "")
+    return route, any(name != route and name not in closed for name in routes)
+
+
+_OWN_SIGN_IN = ("codex-cli",)  # routes that use no browser: their sign-in is not the one the browser's routes share
+
+
+def _switches_route(error: Exception, route: str | None = None) -> bool:
+    """Only a known outcome moves the booklet: a received refusal, or a failure
+    before any send. The browser, the account and the send guard are common to
+    every browser route, so their failures are retried where they are. A route
+    with a sign-in of its own that is signed out moves on: retrying does not
+    sign it in, and the next route does not need it."""
+    if route in _OWN_SIGN_IN and isinstance(error, ChatGptWebAuthenticationRequired):
+        return True
+    return isinstance(error, (ChatGptWebRateLimit, ChatGptWebReplyIncomplete, WorkCannotStandIn)) or (
+        _nothing_sent(error) and not isinstance(
+            error, (ChatGptWebBusy, ChatGptWebBlocked, ChatGptWebAuthenticationRequired,
+                    ChatGptWebBrowserUnavailable)))
+
+
+def _stand_in_failure(conn, session_id: int, route: str, can_switch: bool, error: Exception) -> Exception:
+    """``error`` as the booklet's routes are to treat it: WorkCannotStandIn when Work, behind another primary,
+    cannot take this booklet now and holds nothing of it; otherwise the error itself.
+
+    Work as the primary waits for its browser, its wearer and its sealed job (WorkPending, WorkConflict), and a
+    held browser or another booklet's unconfirmed send is retried where it stands. Behind the CLI that left the
+    booklet "retrying" with no limit, restarted by every poll, or retried for twenty minutes a mark that Chat
+    reads back and clears: the route after Work exists for this. A send whose outcome is unknown is still never
+    moved: not while a Work message of this session has no reply read back (the row's uncertain job, or the chat
+    record after a restart), and not while a sealed answer waits to be taken, unless the job that holds it can no
+    longer be this booklet's (WorkConflict).
+    """
+    if (route != "chatgpt-work" or _is_work() or not can_switch
+            or not isinstance(error, (WorkPending, WorkConflict, ChatGptWebBusy, ChatGptWebBlocked))
+            or any(_work_recovery_job_id(row) for row in _deck_question_rows(conn, session_id))):
+        return error
+    try:
+        unread, sealed = work_holds(session_id)
+    except Exception:  # noqa: BLE001 - what Work holds cannot be read: nothing moves
+        return error
+    if unread or (sealed and not isinstance(error, WorkConflict)):
+        return error
+    return WorkCannotStandIn(f"Work cannot stand in ({type(error).__name__}); nothing sent").with_traceback(
+        error.__traceback__)
+
+
+def _record_solve_failure(conn, row, error: Exception, *, commit: bool = True,
+                          route: str | None = None) -> None:
+    if isinstance(error, ChatGptWebSendNotAuthorized):
+        return  # Setup is a pause: preserve pending rows and retry counts.
+    # Keep a fixed code and optional local job identity, never provider messages.
     current = conn.execute("SELECT structure_json FROM questions WHERE id = ?", (row["id"],)).fetchone()
     metadata = json.loads(current["structure_json"] or "{}")
     if not isinstance(metadata, dict):
         metadata = {}
     metadata["solve_failures"] = int(metadata.get("solve_failures", 0)) + 1
-    metadata["solve_failure"] = {"code": "browser_outcome_unknown"
-                                 if isinstance(error, ChatGptWebUncertain) else "solver_failed"}
+    previous = metadata.get("solve_failure") if isinstance(metadata.get("solve_failure"), dict) else {}
+    metadata["solve_failure"] = {"code": next(
+        (code for kind, code in _FAILURE_CODES if isinstance(error, kind)),
+        "not_sent" if _nothing_sent(error) else "solver_failed")}
+    # The code alone cannot say which check refused (phone, 2026-11-14: one of nine behind "model_mismatch").
+    # Where it was raised is logged; the message never is, since it can carry provider or page text.
+    raised = traceback.extract_tb(error.__traceback__)[-1] if error.__traceback__ else None
+    try:
+        session_of_row = row["session_id"]
+    except (KeyError, IndexError):  # a caller's row that was read without it must still have its failure recorded
+        session_of_row = None
+    print(json.dumps({"event": "solve_failure", "session_id": session_of_row, "code": metadata["solve_failure"]["code"],
+                      "type": type(error).__name__, "route": route,
+                      "at": f"{Path(raised.filename).name}:{raised.lineno}:{raised.name}" if raised else None}), flush=True)
+    if isinstance(error, WorkBrowserUncertain):
+        metadata["solve_failure"]["work_job_id"] = error.work_job_id
+        if previous.get("work_job_id") == error.work_job_id:
+            # How often this same send has since been read back without finding its reply (_retrying).
+            earlier = previous.get("recoveries")
+            metadata["solve_failure"]["recoveries"] = (earlier if type(earlier) is int else 0) + 1
+    if isinstance(error, ChatGptWebUploadBudget):
+        # Local counts, not provider text: the wearer sees how far over the booklet is.
+        metadata["solve_failure"].update(files=error.files, room=error.room)
+    if route and _switches_route(error, route):
+        # ``route`` is passed only while a later route may take over.
+        routes = _session_routes(session_of_row)
+        closed = _closed_routes([current]) | {route}
+        if isinstance(error, ChatGptWebRateLimit) and route in _SHARED_ALLOWANCE:
+            closed |= _SHARED_ALLOWANCE.intersection(routes)
+        closed = sorted(closed)
+        metadata["closed_routes"] = closed
+        following = next((name for name in routes if name not in closed), None)
+        if following:
+            metadata["solve_failure"]["next_route"] = following
     conn.execute("UPDATE questions SET structure_json = ? WHERE id = ?",
                  (json.dumps(metadata, ensure_ascii=False), row["id"]))
-    conn.commit()
+    if commit:
+        conn.commit()
+
+
+# A printed choice as the route answers it since 2026-11-18: its circled label and the option's words in brackets,
+# alone on a line or behind the box's name.
+_CHOICE_LINE = re.compile(r"(?P<head>(?:[^\s：:（）()]{1,8}[：:])?)(?P<label>[①-⑳])（[^（）\n]{1,60}）")
+
+
+def _labels_alone(answer: str) -> str:
+    """A settled choice of one digit, shown as its label alone: the wearer marks the label, and the words take the
+    room of two more answers on a row of the glasses (2026-11-19: the answers of the day's two booklets of choices are
+    96 characters where they were 243, and 152 where they were 416).
+    Only an answer whose every line is such a choice; a label of two digits keeps its words on its line, since soft
+    two-digit labels are misread and the words are what the wearer finds the option by."""
+    lines = answer.split("\n")
+    found = [_CHOICE_LINE.fullmatch(line.strip()) for line in lines]
+    if not all(found):
+        return answer
+    return "\n".join(match["head"] + match["label"] if match["label"] <= "⑨" else line.strip()
+                     for line, match in zip(lines, found))
 
 
 def _answer_bundle_item(conn, group: dict, row) -> dict:
     from .answer_diagrams import validate_diagrams
 
     sol = _latest_solution_row(conn, row["id"])
-    raw = (sol["answer"] or "").strip() if sol is not None else ""
+    raw = (sol["answer"] or "").strip("\r\n") if sol is not None else ""
     display = to_display_answer(raw)
     answer = display.text
     diagram_error = False
@@ -2501,27 +3663,66 @@ def _answer_bundle_item(conn, group: dict, row) -> dict:
         needs_input = metadata.get("answer_status") == "needs_input"
     except (ValueError, TypeError, AttributeError):
         metadata, needs_input = {}, False
+    try:
+        original_numbers = json.loads(row["structure_json"] or "{}").get("answer_no", [])
+    except (ValueError, TypeError, AttributeError):
+        original_numbers = []
+    numbers_error = False
+    try:
+        numbers = answer_numbers(original_numbers or metadata.get("answer_no") or [])
+    except ValueError:
+        numbers, numbers_error = [], True
     if sol is None:
         failure = _solve_failure(row)
         inherited = _solve_failure(group.get("heading"))
         code = (failure or inherited).get("code")
         status = "failed" if failure else "pending"
+        retrying = _retrying(row if failure else group.get("heading"))
+        if retrying:
+            status = "pending"
         issue = ("送信結果の確認待ち。自動再送は停止しています" if code == "browser_outcome_unknown"
+                 else "教科のチャットへ戻れません。新しいチャットは作っていません" if code == "chat_lost"
+                 else "利用制限のため別の経路へ切り替えます" if code == "rate_limited" and retrying
+                 else "返答が途中で終わったため別の経路へ切り替えます" if code == "reply_incomplete" and retrying
+                 else "返答が途中で終わりました。資料は保持しています" if code == "reply_incomplete"
+                 else "ChatGPTの利用制限です。解除後に再開してください" if code == "rate_limited"
+                 else (f"添付{(failure or inherited).get('files')}枚が3時間の利用枠の残り"
+                       f"{(failure or inherited).get('room')}枚を超えます。送信していません") if code == "upload_budget"
+                 else _UPLOAD_REPEATED_ISSUE if code == "upload_repeated"
+                 else _RETRYING_ISSUES[code] if retrying
+                 else _GAVE_UP_ISSUES[code] if code in _GAVE_UP_ISSUES
+                 else "この解答番号の答えが返答にありません" if code == "answer_missing"
+                 else "画像の判読確認と回答が一致しません。資料は保持しています" if code == "image_review_rejected"
+                 else "Workの返答と原画像の照合に失敗しました。資料は保持しています" if code == "work_result_rejected"
                  else "解析に失敗しました。資料は保持しています" if code == "solver_failed" else "未解答")
     elif needs_input:
         status, issue = "needs_input", str(metadata.get("missing_material") or "資料が不足しています")[:1000]
     elif diagram_error:
         status, issue = "needs_review" if answer else "failed", "図の形式を表示できません"
+    elif numbers_error:
+        status, issue = "needs_review" if answer or diagrams else "failed", "解答番号を表示できません"
     elif not answer and not diagrams:
         status, issue = "failed", "解答本文がありません"
-    elif display.complete:
-        status, issue = "ready", ""
     else:
-        # FS-65: an answer whose elements the display cannot carry is never
-        # reported ready. The converted text still reaches the operator.
-        status = "needs_review"
-        issue = "表示できない要素: " + "、".join(display.unsupported)
-    label = "全問" if group["whole"] else (row["question_no"] or "全問")
+        # Shown, and marked to be checked: two independent reads did not agree on this answer (codex-cli), or a
+        # figure or a field outside the format was left out of it (answer_sheet_result).
+        note = metadata.get("review_note")
+        note = note.strip()[:200] if isinstance(note, str) else ""
+        if display.complete:
+            status, issue = ("needs_review", note) if note else ("ready", "")
+        else:
+            # FS-65: an answer whose elements the display cannot carry is never
+            # reported ready. The converted text still reaches the operator.
+            status = "needs_review"
+            issue = "。".join(filter(None, ["表示できない要素: " + "、".join(display.unsupported), note]))
+    # "問1(2)" keeps question_no unique; the glasses show the printed "問1".
+    label = "全問" if group["whole"] else (_printed_label(row) or "全問")
+    if status == "ready":
+        answer = _labels_alone(answer)
+    # What the other of two reads gave where they differ (codex-cli): the glasses show it beside this answer, with
+    # no sentence about it (the operator, 2026-11-19).
+    other = metadata.get("other_answer") if status == "needs_review" else None
+    other = to_display_answer(other.strip()).text[:200] if isinstance(other, str) and other.strip() else ""
     return {
         "group_id": group["id"],
         "group_label": group["label"][:120],
@@ -2530,6 +3731,11 @@ def _answer_bundle_item(conn, group: dict, row) -> dict:
         "answer": answer if status in ("ready", "needs_review") else "",
         "status": status,
         "issue": issue,
+        **({"other": other} if other else {}),
+        # What the two reads do not settle (they differ, or one of them alone gave it: the Codex route's notes all
+        # begin with 2回). The glasses show no such answer; its capture is listed to be taken again (``retake``).
+        **({"uncertain": True} if status == "needs_review" and issue.startswith("2回") else {}),
+        **({"answer_no": numbers} if numbers else {}),
         **({"diagrams": diagrams} if diagrams else {}),
     }
 
@@ -2555,8 +3761,12 @@ def _answer_input_digest(conn, session) -> str:
         pages = [{"question_id": r["id"], "body_text": r["body_text"] or ""}
                  for r in _deck_question_rows(conn, session["id"])]
     material = {"identity_schema": 2, "pages": pages,
-                "audio_sha256": file_sha256(session["audio_path"]),
-                "transcript": session["transcript"] or ""}
+                "audio_sha256": file_sha256(session["audio_path"]) if session["exam_type"] != "mixed" else "",
+                "transcript": (session["transcript"] or "") if session["exam_type"] != "mixed" else ""}
+    if session["exam_type"] == "mixed":
+        material = {"identity_schema": 3,
+                    "pages": [{"page_index": page["page_index"], "image_sha256": page["image_sha256"]}
+                              for page in pages]}
     encoded = json.dumps(material, ensure_ascii=False, sort_keys=True,
                          separators=(",", ":")).encode("utf-8")
     return hashlib.sha256(encoded).hexdigest()
@@ -2578,7 +3788,9 @@ def _answer_revision(conn, session_id: int) -> int:
             failures += max(0, int(metadata.get("solve_failures", 0)))
         except (ValueError, TypeError, AttributeError):
             pass
-    return (row["latest"] or 0) + 1 + failures
+    stage = conn.execute("SELECT analysis_stage FROM exam_sessions WHERE id=?", (session_id,)).fetchone()
+    stage_revision = {"awaiting_audio": 1, "listening": 1, "complete": 2}.get(stage[0], 0) if stage else 0
+    return (row["latest"] or 0) + 1 + failures + stage_revision
 
 
 def _review_operations() -> dict:
@@ -2692,8 +3904,1112 @@ def _release_server_solve(conn, question_id: int, owner_token: str) -> None:
     conn.commit()
 
 
+def _ocr_problems(conn, doc_id: int) -> list:
+    page_rows = conn.execute(
+        "SELECT page_index, ocr_text, vision_text, image_path FROM pages "
+        "WHERE document_id = ? ORDER BY page_index",
+        (doc_id,),
+    ).fetchall()
+    return segment_problems(
+        [
+            # Body drives boundaries; the figure reading is appended
+            # to the owning problem so its labels don't split it.
+            (r["page_index"], r["ocr_text"] or "", r["vision_text"] or (
+                f"Page {r['page_index'] + 1}: OCR unavailable. "
+                "Read the questions and diagrams from the original page image."
+                if r["image_path"] and not (r["ocr_text"] or "").strip()
+                and (config.REAL_MODE or os.environ.get("ROKID_ANALYZER") == "client-ocr")
+                else None
+            ))
+            for r in page_rows
+        ]
+    )
+
+
+def _insert_deck(conn, session_id: int, doc_id: int, problems: list) -> None:
+    """One questions row per problem; the caller commits."""
+    for prob in problems:
+        subject, subj_conf = detect_subject(prob.body_text)
+        primary_page = conn.execute(
+            "SELECT image_path FROM pages "
+            "WHERE document_id = ? AND page_index = ?",
+            (doc_id, prob.start_page_index),
+        ).fetchone()
+        primary_image_path = (
+            primary_page["image_path"] if primary_page is not None else None
+        )
+        conn.execute(
+            """INSERT INTO questions
+               (session_id, question_no, body_text, choices_json, subject,
+                read_conf, page_number, structure_json, image_path)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (
+                session_id,
+                # The boundary-less fallback problem gets a stable
+                # synthesized id so the onboard ingest can address it
+                # (a NULL problem_no would be unreachable by name).
+                prob.question_no or "全体",
+                prob.body_text,
+                json.dumps(prob.choices, ensure_ascii=False),
+                subject,
+                round(min(1.0, 0.5 + subj_conf / 2), 3)
+                if normalize_ocr_text(prob.body_text)
+                else 0.0,
+                prob.start_page_index + 1,
+                json.dumps(
+                    {"page_indexes": prob.page_indexes, "deck": True}
+                ),
+                primary_image_path,
+            ),
+        )
+
+
+# Nothing was sent: Chrome was unreachable, an attachment never confirmed,
+# another session held the browser, or an earlier send was still unconfirmed.
+# No PC is at the venue to start it again, so one such blip must not cost the
+# subject. Five tries 150s apart: at least ten minutes, plus each try's own time.
+PRESEND_TRIES = 5
+PRESEND_RETRY_S = 150.0
+
+
+def _nothing_sent(error: Exception) -> bool:
+    """The client raises the bare base class only before a send. After one it
+    raises ChatGptWebUncertain, and a limit or a lost chat has its own class."""
+    return isinstance(error, (ChatGptWebBusy, ChatGptWebBlocked,
+                              ChatGptWebAuthenticationRequired, ChatGptWebBrowserUnavailable,
+                              ChatGptWebAttachmentFailed, ChatGptWebModelMismatch)) or type(error) is ChatGptWebError
+
+
+def _answer_all(question) -> list | None:
+    """The routed solver's one-message answer for the booklet; None if it has none."""
+    try:
+        solver = get_solver(os.environ.get("ROKID_SOLVER"))
+    except ChatGptWebError:
+        raise
+    except RuntimeError as error:
+        if os.environ.get("ROKID_SOLVER") == "chatgpt-work":
+            raise WorkPending("provider_unavailable_before_queue") from error
+        # REAL_MODE can refuse CDP while the supervised browser is restarting.
+        kind = ChatGptWebBrowserUnavailable if os.environ.get("ROKID_SOLVER") == "chatgpt-web" else ChatGptWebError
+        raise kind("provider is unavailable before send") from error
+    answer_all = getattr(solver, "answer_all", None)
+    return answer_all(question=question) if answer_all else None
+
+
+def _fallback_answer(conn, session_id: int, doc_id: int, question, route: str) -> list:
+    """The same booklet on a later route.
+
+    It reads the canonical upright PNG: Work's sealed sensor JPEG carries its
+    rotation in the manifest, which only the Work prompt explains. Work behind
+    another primary is given that PNG too, whatever ROKID_WORK_ORIGINAL_JPEG says.
+    """
+    try:
+        solver = get_solver(route)
+    except RuntimeError as error:
+        raise ChatGptWebBrowserUnavailable("provider is unavailable before send") from error
+    pages = _document_source_pages(conn, doc_id, session_id, work_originals=False)
+    return solver.answer_all(question=dataclasses.replace(question, document_pages=pages))
+
+
+def _coverage_last(replies: list | None) -> list | None:
+    """What the captures leave out (chatgpt_web._COVERAGE) goes behind the answers.
+
+    The model lists such an item where the gap lies. On the phone on 2026-11-16 that was inside a 大問: the glasses
+    showed 第3問, the notice, then the rest of it under a second heading 第3問(2).
+    """
+    def left_out(item) -> bool:
+        return (isinstance(item, dict) and item.get("status") == "needs_input" and not item.get("answer_no")
+                and not str(item.get("group") or "").strip() and not str(item.get("label") or "").strip())
+
+    if not replies:
+        return replies
+    return [reply for reply in replies if not left_out(reply[0])] + [reply for reply in replies if left_out(reply[0])]
+
+
+def _route_answer(conn, session_id: int, doc_id: int, question, route: str) -> list | None:
+    if route in ("", (os.environ.get("ROKID_SOLVER") or "").strip()):
+        return _coverage_last(_answer_all(question))
+    return _coverage_last(_fallback_answer(conn, session_id, doc_id, question, route))
+
+
+def _commit_fence(work_attempt, failed, route: str):
+    """A reply from a later route has no sealed Work job. Its commit is fenced, as a
+    failure is, on the session and inputs still being the ones the attempt began with."""
+    primary = (os.environ.get("ROKID_SOLVER") or "").strip()
+    return work_attempt if failed or (route or primary) != "chatgpt-work" else None
+
+
+def _give_up_presend(error: Exception, attempt: int, can_switch: bool, route: str | None = None) -> bool:
+    """Stop retrying this route: something was sent, or a later route is waiting
+    and one retry has already shown the failure is not a passing render.
+
+    The Codex CLI gets no retry: it has no page that renders, a signed-out or missing CLI and a model no longer
+    offered are the same 150 s later, and its second try runs the locate step and both reads again."""
+    return not _nothing_sent(error) or (
+        can_switch and (attempt >= 1 or route in _OWN_SIGN_IN) and _switches_route(error, route))
+
+
+def _item_labels(item: dict) -> tuple[str, str]:
+    """(group, label) of a model item, without the group repeated in the label."""
+    group = str(item.get("group") or "").strip()[:60]
+    label = str(item.get("label") or "").strip()[:60]
+    if group and (label == group or (label.startswith(group) and label[len(group):len(group) + 1].isspace())):
+        label = label[len(group):].strip()  # Remove only a separately repeated group, not 問1 in 問10.
+    return group, label
+
+
+def _model_item_labels(items: list | None, page_count: int) -> list[tuple[str, str]]:
+    """Display positions for unprinted items; preserve a sole whole-group answer."""
+    labels = [_item_labels(item) for item in items or []]
+    group_sizes: dict[str, int] = {}
+    for group, _ in labels:
+        group_sizes[group] = group_sizes.get(group, 0) + 1
+    located = []
+    for ordinal, (item, (group, label)) in enumerate(zip(items or [], labels), 1):
+        # A heading can stand for one whole-group answer only when it is the
+        # group's sole returned question. Otherwise every item needs its own row.
+        if not label and (not group or group_sizes[group] > 1):
+            raw_pages = item.get("pages") if isinstance(item.get("pages"), list) else []
+            first_page = min((p for p in raw_pages if isinstance(p, int) and 1 <= p <= page_count), default=1)
+            label = f"P{first_page} 項目{ordinal}（印字なし）"
+        located.append((group, label))
+    return located
+
+
+def _model_problems(items: list | None, page_count: int) -> list[ProblemUnit]:
+    """Validated model list -> deck problems; unprinted items keep their list positions."""
+    if items and len(items) > 300:
+        raise ValueError("a booklet reply must contain at most 300 questions")
+    problems: list[ProblemUnit] = []
+    heading: ProblemUnit | None = None
+    for item, (group, label) in zip(items or [], _model_item_labels(items, page_count)):
+        raw_pages = item.get("pages") if isinstance(item.get("pages"), list) else []
+        pages = sorted({p - 1 for p in raw_pages
+                        if isinstance(p, int) and 1 <= p <= page_count}) or list(range(page_count))
+        if group and not _GROUP_NO_RE.match(group):
+            label, group = f"{group} {label}".strip(), ""
+        if group and (heading is None or heading.question_no != group):
+            heading = ProblemUnit(group, group, start_page_index=pages[0], page_indexes=[])
+            problems.append(heading)
+        elif not group:
+            heading = None
+        if heading is not None:
+            heading.page_indexes = sorted(set(heading.page_indexes) | set(pages))
+        if label:  # no label: the answer is the whole 大問's, on its heading row
+            problems.append(ProblemUnit(label, f"{group} {label}".strip(),
+                                        start_page_index=pages[0], page_indexes=pages))
+    return unique_question_numbers(problems)
+
+
+def _fallback_problems(conn, doc_id: int, page_count: int) -> list:
+    """OCR segments, else one row for the whole document."""
+    return _ocr_problems(conn, doc_id) or [
+        ProblemUnit(None, "", start_page_index=0, page_indexes=list(range(page_count)))]
+
+
+@contextmanager
+def _work_reply_commit_guard(session_id: int, replies, *, failed_attempt=None, route: str | None = None):
+    """Bind only the local deck commit, after all provider work has returned."""
+    if not _is_work(route):
+        yield
+        return
+    if failed_attempt is not None:
+        # Preparation errors have no completed Work job. Still fence their
+        # visible failure against a changed input, closed session or new wearer.
+        with state_guard():
+            conn = db.connect()
+            try:
+                session = _exam_session_or_404(conn, session_id)
+                if (_session_phase(session) != "reviewing" or not session["document_id"]
+                        or (session["mode"] == "real" and not config.ALLOW_REAL_EXAM_SOLVE)):
+                    raise WorkConflict("the Work session is not open for failures")
+                try:
+                    source_pages = _document_source_pages(conn, session["document_id"], session_id)
+                except (OSError, ValueError) as error:
+                    raise WorkConflict("the failed Work input is no longer current") from error
+                current = Question(document_id=str(session["document_id"]),
+                    booklet_stage=session["analysis_stage"], audio_path=session["audio_path"],
+                    document_pages=source_pages)
+                if _work_attempt_identity(session_id, current, route) != failed_attempt:
+                    raise WorkConflict("the failed Work input is no longer current")
+            finally:
+                conn.close()
+            yield
+        return
+    identities = {item.get("_work_job_id") for item, _ in replies}
+    if len(identities) != 1 or None in identities:
+        raise WorkConflict("the Work reply has no sealed job identity")
+    with state_guard():
+        try:
+            _, job = _work_current_job(identities.pop())
+        except HTTPException as error:
+            raise WorkConflict("the Work reply is no longer current") from error
+        if job["session_id"] != session_id or job["status"] != "completed":
+            raise WorkConflict("the Work reply is not committed for this session")
+        yield
+
+
+def _work_attempt_identity(session_id: int, question, route: str | None = None):
+    """Snapshot input hashes and native identity before provider work begins."""
+    if not _is_work(route):
+        return None
+    with state_guard():
+        audio = None if question.booklet_stage == "reading" else question.audio_path
+        return (work_binding(session_id), question.document_id, question.booklet_stage,
+                tuple((page["page_number"], page["image_path"], page["image_sha256"],
+                       json.dumps(page.get("capture_provenance"), sort_keys=True, separators=(",", ":")),
+                       page.get("canonical_image_sha256"))
+                      for page in question.document_pages), audio, file_sha256(audio))
+
+
+def _save_compared(conn, session_id: int, doc_id: int, placed: dict[int, int], early: list, replies: list,
+                   route: str, page_count: int) -> None:
+    """The compared answers, saved over the questions the first read's answers are already shown under.
+
+    A question keeps its row, and so its identity and its place on the glasses, which refuse a snapshot that
+    reorders questions or changes what the paper prints for one (AnswerReader.accept): it also keeps the answer
+    numbers it was first shown with. A question only the second read listed gets a row of its own behind the row
+    of the question before it (``after``, read by _deck_question_rows). It stands under that row's 大問 and names
+    its own in its label when that is another one.
+    ponytail: no heading row is made for an added question; make one if whole 大問 turn out to be added often.
+    """
+    first = {id(item) for item, _ in early}
+    rows = {row["id"]: row for row in _deck_question_rows(conn, session_id)}
+    anchor, heading = 0, ""  # the row an added question goes behind, and the 大問 that row stands under
+    for (item, result), (group, label) in zip(replies, _model_item_labels([item for item, _ in replies], page_count)):
+        if group and not _GROUP_NO_RE.match(group):
+            label, group = f"{group} {label}".strip(), ""
+        row = rows.get(placed.get(id(item)))
+        if row is not None:
+            if not _GROUP_NO_RE.match(row["question_no"] or ""):
+                # Never behind a 大問 answered whole: that row is its own heading, and a row behind it would turn it
+                # into a mere heading and take its answer out of view.
+                anchor, heading = row["id"], group or heading
+            if isinstance(result, SolveResult):
+                shown = _latest_solution_row(conn, row["id"])
+                result.extras["answer_no"] = (json.loads(shown["answer_metadata_json"] or "{}").get("answer_no")
+                                              if shown is not None else [])
+                _save_solution(conn, row, result, route, commit=False, again=True)
+            continue
+        if id(item) in first:
+            continue  # it had no row of its own when the first read was saved either
+        text = (label or "全問") + (f"（{group}）" if group and group != heading else "")
+        if _GROUP_NO_RE.match(text):
+            text = f"全問（{text}）"  # a row that reads as a 大問 is taken for a heading (_answer_groups)
+        raw_pages = item.get("pages") if isinstance(item.get("pages"), list) else []
+        pages = sorted({p - 1 for p in raw_pages if isinstance(p, int) and 1 <= p <= page_count}) or list(range(page_count))
+        _insert_deck(conn, session_id, doc_id, [ProblemUnit(text, text, start_page_index=pages[0], page_indexes=pages)])
+        row = conn.execute("SELECT * FROM questions WHERE session_id = ? ORDER BY id DESC LIMIT 1", (session_id,)).fetchone()
+        conn.execute("UPDATE questions SET structure_json = ? WHERE id = ?",
+                     (json.dumps({**json.loads(row["structure_json"]), "after": anchor}), row["id"]))
+        placed[id(item)] = row["id"]  # a later saving over the same replies (a booklet read again) finds it there
+        if isinstance(result, SolveResult):
+            _save_solution(conn, row, result, route, commit=False)
+        else:
+            _record_solve_failure(conn, row, result or ValueError("no answer for this question"), commit=False)
+    conn.commit()
+
+
+def _retake_round(session) -> dict | None:
+    """The last time this booklet's pages were taken again after its answers were read (``exam_retake``); None for a
+    booklet read once. ``mark`` is the newest answer on record when the retake was asked for: what was shown before
+    it. ``state`` is "open" from then until the new reading's answers are saved or that reading has given up."""
+    try:
+        found = json.loads(session["retake_json"] or "null")
+    except (ValueError, TypeError, IndexError, KeyError):
+        return None
+    return found if isinstance(found, dict) and type(found.get("mark")) is int else None
+
+
+def _retake_open(session) -> bool:
+    found = _retake_round(session)
+    return found is not None and found.get("state") == "open"
+
+
+def _retake_close(conn, session_id: int) -> bool:
+    """The new reading has answered, or has given up: the answers are given again. Not committed here."""
+    row = conn.execute("SELECT retake_json FROM exam_sessions WHERE id = ?", (session_id,)).fetchone()
+    found = _retake_round(row) if row is not None else None
+    if found is None or found.get("state") != "open":
+        return False
+    conn.execute("UPDATE exam_sessions SET retake_json = ? WHERE id = ?",
+                 (json.dumps({**found, "state": "done"}), session_id))
+    return True
+
+
+def _placed_again(conn, session_id: int, replies: list, page_count: int) -> dict[int, int]:
+    """id() of a reply's item -> the question row it answers, for a booklet read again after a retake.
+
+    By the printed answer numbers the row was shown with, else by the group and label the row was made from; each
+    row once. A question the new reading names otherwise gets a row of its own (``_save_compared``).
+    """
+    by_numbers: dict[tuple, list[int]] = {}
+    by_text: dict[str, list[int]] = {}
+    for row in (row for group in _answer_groups(conn, session_id) for row in group["items"]):
+        shown = _latest_solution_row(conn, row["id"])
+        try:
+            numbers = tuple(json.loads(shown["answer_metadata_json"] or "{}").get("answer_no") or []) if shown else ()
+        except (ValueError, TypeError, AttributeError):
+            numbers = ()
+        if numbers:
+            by_numbers.setdefault(numbers, []).append(row["id"])
+        by_text.setdefault(row["body_text"] or "", []).append(row["id"])
+    placed: dict[int, int] = {}
+    used: set[int] = set()
+    items = [item for item, _ in replies]
+    for item, labels in zip(items, _model_item_labels(items, page_count)):
+        numbers = tuple(number for number in item.get("answer_no") or [] if type(number) is int)
+        for pool in (by_numbers.get(numbers, []) if numbers else [], by_text.get(" ".join(filter(None, labels)), [])):
+            row_id = next((candidate for candidate in pool if candidate not in used), None)
+            if row_id is not None:
+                placed[id(item)] = row_id
+                used.add(row_id)
+                break
+    return placed
+
+
+# The sessions whose booklet is being read again after a retake by the batch that runs now (_answer_booklet): that
+# batch closes the retake when it ends, whatever came of it (_solve_deck_in_background).
+_resolving: set[int] = set()
+
+# The sessions whose route has shown its first read's answers and is still comparing them with its other read.
+# In memory on purpose: after a restart no comparison is under way, and the booklet then says that nothing was
+# compared (_answer_snapshot).
+_comparing: set[int] = set()
+
+
+def _answer_deck(conn, session, session_id: int, doc_id: int) -> bool:
+    try:
+        return _answer_booklet(conn, session, session_id, doc_id)
+    finally:
+        _comparing.discard(session_id)  # compared, failed or given up: nothing is under way any more
+
+
+def _answer_booklet(conn, session, session_id: int, doc_id: int) -> bool:
+    """The whole booklet in ONE message when the routed solver can take it.
+
+    Returns False when the solver answers per question instead. Otherwise the
+    one reply both names the 小問 (RP-12) and answers them, and nothing else is
+    sent, on success or failure: on 9/29 a list-only reply followed by one
+    message per 小問 sent the next message before anything was answered.
+
+    A route that reads twice hands its first read's answers over while the other
+    read still runs (codex-cli, Question.on_first_read). They are saved and shown
+    at once, as the answers of a booklet read once, with a notice that the
+    comparison is to come (_comparing_item); the compared answers then go over the
+    same questions (_save_compared). From then on the route has answered: nothing
+    that fails behind it is recorded as a failure or moves the booklet to another route.
+    """
+    if os.environ.get("ROKID_SOLVER", "").strip() in _SEND_GATED_ROUTES and not chatgpt_send_enabled():
+        return True  # Keep the reviewing session and originals for later permission.
+    if session["exam_type"] == "mixed":
+        return _answer_mixed_deck(conn, session, session_id, doc_id)
+    items = [row for group in _answer_groups(conn, session_id) for row in group["items"]]
+    # Pages were taken again after the answers were read (exam_retake): the booklet is read again whole, and its
+    # answers go over the questions the wearer was shown.
+    again = bool(items) and _retake_open(session)
+    if items and all(_latest_solution_row(conn, row["id"]) for row in items) and not again:
+        return True  # a repeated finalize must not ask again
+    if again:
+        _resolving.add(session_id)
+    source_pages = _document_source_pages(conn, doc_id, session_id)
+    question = Question(
+        question_no=None,
+        audio_path=session["audio_path"],
+        chat_key=f"session:{session_id}",
+        document_image_paths=_document_image_paths(conn, doc_id),
+        document_pages=source_pages,
+        document_id=str(doc_id),
+        question_id="booklet",
+        page_numbers=[p["page_number"] for p in source_pages],
+        answer_only=True,
+    )
+    route, can_switch = _booklet_route(conn, session_id)
+    try:
+        work_attempt = _work_attempt_identity(session_id, question, route)
+    except WorkConflict:
+        return True
+    early: list = []  # the first read's replies, once their answers are saved and shown
+    placed: dict[int, int] = {}  # id() of a reply's item -> the question row that holds its answer
+
+    def store(replies, failed) -> None:
+        """The model's questions as the deck's rows and every answer, or the failure, in one commit."""
+        nonlocal items
+        if again:
+            if failed is not None:
+                _record_solve_failure(conn, items[0], failed, commit=False, route=route if can_switch else None)
+                conn.commit()
+                return
+            # Over the rows that are shown; the retake is closed in the same commit, so the answers are given
+            # again exactly when the new ones are there.
+            placed.update(_placed_again(conn, session_id, replies, len(source_pages)))
+            _retake_close(conn, session_id)
+            _save_compared(conn, session_id, doc_id, placed, [], replies, route or "chatgpt-web", len(source_pages))
+            return
+        problems = _model_problems([item for item, _ in replies], len(source_pages))
+        carried = 0
+        if problems and items and not any(_latest_solution_row(conn, row["id"]) for row in items):
+            # Only the whole-booklet row of a failed message: the model's list replaces it.
+            replaced = _deck_question_rows(conn, session_id)
+            carried = sum(_failure_count(row) for row in replaced)
+            conn.executemany("DELETE FROM questions WHERE id = ?", [(row["id"],) for row in replaced])
+            items = []
+        if not items:
+            # The model sorts the questions. OCR never does on this route: a failure
+            # gets one row for the whole booklet, which only carries the reason.
+            _insert_deck(conn, session_id, doc_id, problems or [ProblemUnit(
+                None, "", start_page_index=0, page_indexes=list(range(len(source_pages))))])
+            if carried:
+                # The revision counts failures; dropping them with the old row would
+                # move it backwards, and the glasses refuse an older snapshot.
+                first = _deck_question_rows(conn, session_id)[0]
+                conn.execute("UPDATE questions SET structure_json = ? WHERE id = ?", (json.dumps(
+                    {**json.loads(first["structure_json"]), "solve_failures": carried}), first["id"]))
+            items = [row for group in _answer_groups(conn, session_id) for row in group["items"]]
+        # The rows and every answer land in ONE commit: the glasses never read a
+        # deck whose rows exist and whose answers are not saved yet.
+        if failed is not None:
+            _record_solve_failure(conn, items[0], failed, commit=False,
+                                  route=route if can_switch else None)
+            conn.commit()
+            return
+        # The body retains its printed labels or generated position, untouched
+        # by the suffix that keeps question_no unique. Repeated printed labels
+        # (two answer slots of one 問) keep reply order.
+        results: dict[str, list[tuple]] = {}
+        for reply, labels in zip(replies, _model_item_labels([item for item, _ in replies], len(source_pages))):
+            results.setdefault(" ".join(filter(None, labels)), []).append(reply)
+        for row in items:
+            if _latest_solution_row(conn, row["id"]) is not None:
+                continue
+            item, result = (results.get(row["body_text"]) or [(None, None)]).pop(0)
+            if item is not None:
+                placed[id(item)] = row["id"]
+            if isinstance(result, SolveResult):
+                _save_solution(conn, row, result, route or "chatgpt-web", commit=False)
+            else:
+                _record_solve_failure(conn, row, result or ValueError("no answer for this question"),
+                                      commit=False)
+        conn.commit()
+
+    def first_read(replies) -> None:
+        nonlocal items
+        replies = _coverage_last(replies)
+        if early or not replies or len(replies) > 300:
+            return
+        before = items
+        try:
+            store(replies, None)
+        except Exception:
+            # Nothing of it stays: the route goes on, and what it returns is saved in one piece as before.
+            conn.rollback()
+            placed.clear()
+            items = before
+            raise
+        early.extend(replies)  # also keeps the items alive: ``placed`` goes by their identity
+        _comparing.add(session_id)
+
+    def not_compared(error: Exception) -> bool:
+        """The first read's answers are out and stay: the route has answered. Which kind of failure ended the
+        comparison is logged; the booklet then says that nothing was compared (_read_once_item)."""
+        conn.rollback()
+        print(json.dumps({"event": "comparison_lost", "session_id": session_id, "route": route,
+                          "type": type(error).__name__}), flush=True)
+        return True
+
+    if not _is_work(route):  # Work's replies are committed under its sealed job, in one piece
+        question.on_first_read = first_read
+    failed: Exception | None = None
+    for attempt in range(PRESEND_TRIES):
+        if attempt:
+            time.sleep(PRESEND_RETRY_S)
+        try:
+            replies, failed = _route_answer(conn, session_id, doc_id, question, route), None
+            if replies is not None and len(replies) > 300:
+                raise ValueError("a booklet reply must contain at most 300 questions")
+            break
+        except Exception as error:  # noqa: BLE001 - recorded on the deck, never resent
+            if early:
+                return not_compared(error)
+            error = _stand_in_failure(conn, session_id, route, can_switch, error)
+            if isinstance(error, (ChatGptWebSendNotAuthorized, WorkPending, WorkConflict)):
+                return True
+            replies, failed = [], error
+            if _give_up_presend(error, attempt, can_switch, route):
+                break
+    if replies is None:
+        return False
+    if early:
+        try:
+            _save_compared(conn, session_id, doc_id, placed, early, replies, route or "chatgpt-web", len(source_pages))
+        except Exception as error:  # noqa: BLE001 - the answers that are out are not taken back
+            return not_compared(error)
+        return True
+    try:
+        with _work_reply_commit_guard(session_id, replies, failed_attempt=_commit_fence(work_attempt, failed, route), route=route):
+            store(replies, failed)
+            return True
+    except WorkConflict:
+        conn.rollback()
+        return True
+
+
+
+def _mixed_audio_rows(conn, session_id):
+    return [row for row in _deck_question_rows(conn, session_id)
+            if json.loads(row["structure_json"] or "{}").get("requires_audio") is True]
+
+
+def _answer_mixed_deck(conn, session, session_id: int, doc_id: int) -> bool:
+    """Commit the image-only inventory and reading answers before audio can run."""
+    from .solvers.base import Question, SolveResult
+
+    if session["analysis_stage"] in ("awaiting_audio", "listening"):
+        return _answer_mixed_audio(conn, session, session_id, doc_id)
+    if session["analysis_stage"] != "reading":
+        return True
+    if not _mixed_work_pending(conn, session):
+        return True  # A terminal first-stage failure cannot start another image or audio send.
+    source_pages = _document_source_pages(conn, doc_id, session_id)
+    question = Question(chat_key=f"session:{session_id}", booklet_stage="reading",
+                        document_pages=source_pages, document_id=str(doc_id),
+                        question_id="booklet", answer_only=True)
+    route, can_switch = _booklet_route(conn, session_id)
+    try:
+        work_attempt = _work_attempt_identity(session_id, question, route)
+    except WorkConflict:
+        return True
+    failed, replies = None, []
+    for attempt in range(PRESEND_TRIES):
+        if attempt:
+            time.sleep(PRESEND_RETRY_S)
+        try:
+            replies = _route_answer(conn, session_id, doc_id, question, route)
+            if (not replies or len(replies) > 300
+                    or any(type(item.get("requires_audio")) is not bool
+                           or (item["requires_audio"] and result is not None)
+                           or (not item["requires_audio"] and result is None)
+                           for item, result in replies)):
+                raise ValueError("mixed analysis requires an explicit complete audio classification")
+            failed = None
+            break
+        except Exception as error:  # noqa: BLE001 - never resend an uncertain stage
+            error = _stand_in_failure(conn, session_id, route, can_switch, error)
+            if isinstance(error, (ChatGptWebSendNotAuthorized, WorkPending, WorkConflict)):
+                return True
+            replies, failed = [], error
+            if _give_up_presend(error, attempt, can_switch, route):
+                break
+    try:
+        with _work_reply_commit_guard(session_id, replies, failed_attempt=_commit_fence(work_attempt, failed, route), route=route):
+            old_rows = _deck_question_rows(conn, session_id)
+            carried = sum(_failure_count(row) for row in old_rows)
+            closed = sorted(_closed_routes(old_rows))
+            if failed is not None:
+                if not old_rows:
+                    _insert_deck(conn, session_id, doc_id, [ProblemUnit(
+                        None, "", start_page_index=0, page_indexes=list(range(len(source_pages))))])
+                    old_rows = _deck_question_rows(conn, session_id)
+                _record_solve_failure(conn, old_rows[0], failed, commit=False,
+                                      route=route if can_switch else None)
+                conn.commit()
+                return True
+            if any(_latest_solution_row(conn, row["id"]) for row in old_rows):
+                raise ValueError("mixed reading inventory cannot replace saved answers")
+            conn.executemany("DELETE FROM questions WHERE id=?", [(row["id"],) for row in old_rows])
+            _insert_deck(conn, session_id, doc_id, _model_problems([item for item, _ in replies], len(source_pages)))
+            results = {}
+            for (item, result), labels in zip(replies, _model_item_labels([item for item, _ in replies], len(source_pages))):
+                results.setdefault(" ".join(filter(None, labels)), []).append((item, result))
+            items = [row for group in _answer_groups(conn, session_id) for row in group["items"]]
+            for index, row in enumerate(items):
+                metadata = json.loads(row["structure_json"])
+                if carried and index == 0:
+                    metadata["solve_failures"] = carried
+                if closed and index == 0:
+                    # An all-audio paper saves no reading answer to pin the route.
+                    metadata["closed_routes"] = closed
+                matched = results.get(row["body_text"])
+                item, result = matched.pop(0) if matched else ({}, AnswerMissing(row["question_no"]))
+                metadata.update(requires_audio=item.get("requires_audio") is True,
+                                answer_no=answer_numbers(item.get("answer_no")),
+                                booklet_item={"group": _item_labels(item)[0], "label": _item_labels(item)[1],
+                                              "answer_no": answer_numbers(item.get("answer_no")),
+                                              "pages": [p + 1 for p in metadata["page_indexes"]]})
+                conn.execute("UPDATE questions SET structure_json=? WHERE id=?", (json.dumps(metadata), row["id"]))
+                if isinstance(result, SolveResult):
+                    result.extras["answer_no"] = metadata["answer_no"]
+                    _save_solution(conn, row, result, route or "chatgpt-web", commit=False)
+                elif result is not None:
+                    refreshed = conn.execute("SELECT * FROM questions WHERE id=?", (row["id"],)).fetchone()
+                    _record_solve_failure(conn, refreshed, result, commit=False)
+            stage = "awaiting_audio" if _mixed_audio_rows(conn, session_id) else "complete"
+            conn.execute("UPDATE exam_sessions SET analysis_stage=? WHERE id=?", (stage, session_id))
+            conn.commit()
+            return True
+    except WorkConflict:
+        conn.rollback()
+        return True
+
+
+
+def _available_stage(session, items):
+    """Display availability, including failure reasons; never a correctness label."""
+    if session["exam_type"] == "mixed":
+        stage = session["analysis_stage"]
+        if stage == "complete":
+            return "complete"
+        if stage in ("awaiting_audio", "listening") or (
+                stage == "reading" and items and all(item["status"] != "pending" for item in items)):
+            return "reading"
+        return "none"
+    return "complete" if items and all(item["status"] != "pending" for item in items) else "none"
+
+
+def _mixed_work_pending(conn, session):
+    rows = _deck_question_rows(conn, session["id"])
+    if session["analysis_stage"] == "reading":
+        return not rows or (not any(_latest_solution_row(conn, row["id"]) for row in rows)
+                            and any(_retrying(row) for row in rows))
+    if session["analysis_stage"] not in ("awaiting_audio", "listening") or not session["audio_path"]:
+        return False
+    audio_rows = [row for row in _mixed_audio_rows(conn, session["id"])
+                  if _latest_solution_row(conn, row["id"]) is None]
+    return bool(audio_rows) and not any(_solve_failure(row) and not _retrying(row) for row in audio_rows)
+
+
+def _answer_mixed_audio(conn, session, session_id, doc_id):
+    """Add only the verified original recording; preserve every existing question and answer."""
+    from .listening import recording_transcript
+    from .solvers.base import Question, SolveResult
+
+    if not _mixed_work_pending(conn, session):
+        return True
+    rows = [row for row in _mixed_audio_rows(conn, session_id) if _latest_solution_row(conn, row["id"]) is None]
+    slots = [{"question_id": f"q{row['id']}", **json.loads(row["structure_json"])["booklet_item"]}
+             for row in rows]
+    conn.execute("UPDATE exam_sessions SET analysis_stage='listening' WHERE id=?", (session_id,))
+    conn.commit()
+    question = Question(chat_key=f"session:{session_id}", booklet_stage="listening",
+                        booklet_questions=slots, audio_path=session["audio_path"],
+                        document_pages=_document_source_pages(conn, doc_id, session_id),
+                        document_id=str(doc_id), question_id="booklet", answer_only=True)
+    # The recording goes to the chat that holds the images: this stage never switches.
+    route, _ = _booklet_route(conn, session_id)
+    try:
+        work_attempt = _work_attempt_identity(session_id, question, route)
+    except WorkConflict:
+        return True
+    failed, replies = None, []
+    for attempt in range(PRESEND_TRIES):
+        if attempt:
+            time.sleep(PRESEND_RETRY_S)
+        try:
+            path, _ = recording_transcript(doc_id, require_transcript=False, verify_original=True)
+            if path != session["audio_path"]:
+                raise ValueError("completed original audio identity changed")
+            replies = _route_answer(conn, session_id, doc_id, question, route)
+            ids = [item.get("question_id") for item, _ in (replies or [])]
+            if (any(not isinstance(qid, str) for qid in ids) or len(ids) != len(set(ids))
+                    or set(ids) != {slot["question_id"] for slot in slots}
+                    or any(result is None for _, result in replies or [])):
+                raise ValueError("audio answers must match the pending original question identities")
+            failed = None
+            break
+        except Exception as error:  # noqa: BLE001 - the uncertain barrier stays in force
+            if isinstance(error, (ChatGptWebSendNotAuthorized, WorkPending, WorkConflict)):
+                return True
+            replies, failed = [], error
+            if not _nothing_sent(error):
+                break
+    try:
+        with _work_reply_commit_guard(session_id, replies, failed_attempt=_commit_fence(work_attempt, failed, route), route=route):
+            if failed is not None:
+                for row in rows:
+                    _record_solve_failure(conn, row, failed, commit=False)
+                conn.commit()
+                return True
+            results = {item["question_id"]: result for item, result in replies}
+            for row in rows:
+                result = results[f"q{row['id']}"]
+                if isinstance(result, SolveResult):
+                    result.extras["answer_no"] = json.loads(row["structure_json"])["answer_no"]
+                    _save_solution(conn, row, result, route or "chatgpt-web", commit=False)
+                else:
+                    _record_solve_failure(conn, row, result, commit=False)
+            conn.execute("UPDATE exam_sessions SET analysis_stage='complete' WHERE id=?", (session_id,))
+            conn.commit()
+            return True
+    except WorkConflict:
+        conn.rollback()
+        return True
+
+
+
+def _save_solution(conn, row, result, solver_name: str, *, commit: bool = True, again: bool = False) -> bool:
+    """Store ``result`` unless the row already has an answer; True when stored.
+
+    Onboard ingest may answer while the paid call is in flight. The conditional
+    insert preserves that earlier answer. ``again`` stores it as the row's newer
+    answer (the latest row wins, and the revision moves on): the compared answer
+    over the first read's (_save_compared).
+    """
+    evidence_pages, evidence_refs = _prepare_result_evidence(
+        result,
+        fallback_pages=_question_evidence_pages(conn, row["id"]),
+        fallback_refs=_question_evidence_refs(conn, row["id"]),
+    )
+    cur = conn.execute(
+        """INSERT INTO solutions
+           (question_id, solver_name, answer, solution_steps_json,
+            rationale, cautions, answer_conf, rationale_conf,
+            evidence_pages_json, evidence_refs_json,
+            raw_reasoning, served_by, diagrams_json, answer_metadata_json)
+           SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+           WHERE ? OR NOT EXISTS
+               (SELECT 1 FROM solutions WHERE question_id = ?)""",
+        (
+            row["id"],
+            solver_name,
+            result.answer,
+            json.dumps(result.solution_steps, ensure_ascii=False),
+            result.rationale,
+            result.cautions,
+            result.answer_confidence,
+            result.rationale_confidence,
+            json.dumps(evidence_pages),
+            _evidence_refs_storage_value(result),
+            result.raw_reasoning,
+            result.extras.get("served_by", solver_name),
+            json.dumps(result.diagrams, ensure_ascii=False),
+            json.dumps({**{k: result.extras.get(k)
+                           for k in ("answer_status", "missing_material", "answer_no", "review_note")},
+                        # The other read's answer where two reads differ (codex-cli): shown beside this one.
+                        **({"other_answer": result.extras["other_answer"]}
+                           if isinstance(result.extras.get("other_answer"), str) else {}),
+                        # One read of two answered (codex-cli): said once behind the answers (_read_once_item).
+                        **({"read_once": True} if result.extras.get("read_once") is True else {}),
+                        # No read saw every page at its own size (codex-cli): said too (_pages_reduced_item).
+                        **({"pages_reduced": True} if result.extras.get("pages_reduced") is True else {})},
+                       ensure_ascii=False),
+            int(again),
+            row["id"],
+        ),
+    )
+    if commit:
+        conn.commit()
+    return bool(cur.rowcount)
+
+
+def _solve_deck(conn, session, session_id: int, doc_id: int, *, bundle_items: bool = False) -> int:
+    """Solve every deck problem that has no solution yet; return how many were saved.
+
+    Resumable and claim-guarded, so a synchronous call and a background batch
+    for the same session never pay for the same problem twice. ``bundle_items``
+    (the glassdoc route) solves only what answer-bundle shows and names the 大問
+    in the locator; the frozen /review route keeps solving every deck row.
+    """
+    if os.environ.get("ROKID_SOLVER", "").strip() in _SEND_GATED_ROUTES and not chatgpt_send_enabled():
+        return 0
+    server_solved = 0
+    # Context is scoped to each problem's own 大問 (plan.md contract 1),
+    # not the whole document: every prompt is prefilled per question, so
+    # the whole booklet per 小問 is paid for once per 小問.
+    page_windows = _group_page_indexes(conn, session_id)
+    source_pages = _document_source_pages(conn, doc_id, session_id)
+    # "第2問 問1", not "問1(2)": the suffix is a deck id the booklet never prints.
+    locators = {
+        row["id"]: " ".join(filter(None, [
+            group["label"] if not group["whole"] and _GROUP_NO_RE.match(group["label"]) else "",
+            re.sub(r"\(\d+\)$", "", row["question_no"] or ""),
+        ]))
+        for group in _answer_groups(conn, session_id) for row in group["items"]
+    }
+    for row in _deck_question_rows(conn, session_id):
+        # A 大問 heading with 小問 under it is a label, not a question: sending
+        # it cost one extra browser message per 大問 that nothing displayed.
+        if (bundle_items and row["id"] not in locators) or _latest_solution_row(conn, row["id"]) is not None:
+            continue
+        claim_token = _claim_server_solve(conn, row["id"])
+        if not claim_token:
+            continue
+        try:
+            with _claim_heartbeat(
+                lambda: _renew_server_solve_claim(row["id"], claim_token),
+                name=f"solve-claim-{row['id']}",
+            ):
+                start_index = (row["page_number"] or 1) - 1
+                doc_material = _document_material(
+                    conn, doc_id, start_index, page_windows.get(row["id"])
+                )
+                retrieved = retrieve_context(conn, row["body_text"])
+                context = _exam_prompt_context(
+                    session, doc_material, retrieved["context"]
+                )
+                window = page_windows.get(row["id"]) or _row_page_indexes(row)
+                question = Question(
+                    question_no=(bundle_items and locators.get(row["id"])) or row["question_no"],
+                    body_text=row["body_text"],
+                    choices=json.loads(row["choices_json"] or "[]"),
+                    subject=row["subject"],
+                    context=context,
+                    image_path=row["image_path"],
+                    image_paths=_page_image_paths(conn, doc_id, window),
+                    required_image_paths=[
+                        p["image_path"] for p in source_pages
+                        if p["page_number"] - 1 in (window or []) and p["image_path"]
+                        and not _page_material(p["ocr_text"], p["vision_text"])
+                    ],
+                    # Listening: the recording itself, not only its
+                    # transcript. A solver that takes audio hears the
+                    # speaker turns and numbers a transcript flattens.
+                    audio_path=session["audio_path"],
+                    # One session is one paper, so one chat. Never the
+                    # row's `subject`: that is a per-row heuristic.
+                    chat_key=f"session:{session_id}",
+                    # The whole booklet, attached once per chat, and
+                    # where this question sits inside it.
+                    document_image_paths=_document_image_paths(conn, doc_id),
+                    document_pages=source_pages,
+                    document_id=str(doc_id),
+                    audio_transcript=session["transcript"] or "",
+                    question_id=f"q{row['id']}",
+                    page_numbers=[i + 1 for i in (window or [])],
+                    # What the operator writes on the answer sheet, and
+                    # nothing else. This is the documented contract
+                    # (Solver 1.3.0) and was never set on this path.
+                    answer_only=True,
+                )
+                try:
+                    result, solver = solve_with_fallback(question=question)
+                except Exception as error:  # noqa: BLE001 - retain resumable failures
+                    _record_solve_failure(conn, row, error)
+                    if isinstance(error, (ChatGptWebUncertain, ChatGptWebChatLost)):
+                        # Do not touch the browser for the remaining questions:
+                        # after a lost chat each would fail the same way.
+                        break
+                    continue
+            served_by = result.extras.get("served_by", solver.name)
+            if served_by == "local":
+                # A failed/missing cloud adapter fell back to the
+                # placeholder. Release the claim for a future retry,
+                # but never mark placeholder output as solved.
+                continue
+            if _save_solution(conn, row, result, solver.name):
+                server_solved += 1
+        finally:
+            _release_server_solve(conn, row["id"], claim_token)
+    return server_solved
+
+
+# One background batch per session: the browser solver drives a single chat,
+# and a second concurrent batch would type into it at the same time.
+_background_solves: set[int] = set()
+_background_solves_lock = threading.Lock()
+
+
+# Only a session started this long ago or less is resumed: one venue session
+# is 150 minutes. Older reviewing sessions in the phone DB are history, and
+# resuming them at startup would send each one before the next real run.
+RESUME_WINDOW_S = 3 * 3600
+
+
+def _resume_answers(conn, session) -> bool:
+    """Start the background batch again when nothing is answering this session.
+
+    A restart ends the batch thread, and a failure that sent nothing leaves only
+    the reason on the deck; with no PC at the venue neither may cost the
+    subject. Only a recent session with no deck rows, or one whose deck carries
+    a retrying failure and no answer, is restarted. A booklet already in its
+    chat is read back, never sent again (ChatGptWebSolver.answer_all). True
+    when a batch is running.
+    """
+    session_id = session["id"]
+    solver_env = (os.environ.get("ROKID_SOLVER") or "").strip()
+    if (not session["document_id"] or _session_phase(session) == "reading"
+            or solver_env in ("", "local")
+            or (solver_env in _SEND_GATED_ROUTES and not chatgpt_send_enabled())
+            or (session["mode"] == "real" and not config.ALLOW_REAL_EXAM_SOLVE)):
+        return False
+    recent = conn.execute(
+        "SELECT created_at >= datetime('now', ?) FROM exam_sessions WHERE id = ?",
+        (f"-{int(RESUME_WINDOW_S)} seconds", session_id)).fetchone()
+    if not (recent and recent[0]):
+        return False
+    rows = _deck_question_rows(conn, session_id)
+    if session["exam_type"] == "mixed":
+        if not _mixed_work_pending(conn, session):
+            return False
+    elif rows and not _retake_open(session) and (any(_latest_solution_row(conn, row["id"]) for row in rows)
+                                                 or not any(_retrying(row) for row in rows)):
+        # (A booklet that is being read again after a retake has answers from before and waits for the new ones:
+        # with nothing reading it, a restart of the server having taken its batch, it is taken up here.)
+        return False
+    with _background_solves_lock:
+        if session_id in _background_solves:
+            return True
+    recovery_jobs = {_work_recovery_job_id(row) for row in rows
+                     if _latest_solution_row(conn, row["id"]) is None and _work_recovery_job_id(row)}
+    if recovery_jobs:
+        if len(recovery_jobs) != 1:
+            return False
+        try:
+            _, job = _work_current_job(next(iter(recovery_jobs)))
+        except HTTPException:
+            return False
+        if job["session_id"] != session_id:
+            return False
+    with _background_solves_lock:
+        if session_id in _background_solves:
+            return True
+        _background_solves.add(session_id)
+    threading.Thread(target=_solve_deck_in_background, args=(session_id, session["document_id"]),
+                     name=f"solve-session-{session_id}", daemon=True).start()
+    return True
+
+
+def _startup_sessions() -> set[int] | None:
+    """The sessions a start of the server resumes by itself; None is every one, as it was for all until 2026-11-17.
+
+    Every unanswered session of the last three hours used to start again at once: booklets nobody waits for ran
+    again, the CLI paid for them again, and they held the one browser while the wearer's own booklet waited. Now
+    it is the session the newest glasses state names, unless its wearer has finished, and the sessions with a
+    message on the browser's record, which are only read back. Any other stays as it is until its answers are
+    asked for: the bundle request and the watcher's poll resume a session when they name it (_answer_snapshot).
+    Where no glasses have ever registered (a run from a PC) or their state cannot be read, nothing says which
+    session is waited for, and every one is resumed as before.
+    """
+    try:
+        states = list_states()
+    except (OSError, ValueError, TypeError, KeyError):
+        return None
+    if not states:
+        return None
+    wanted = sessions_with_a_send_on_record()
+    if states[0]["session_id"] is not None and states[0]["phase"] not in ("closed", "writing_done"):
+        wanted.add(states[0]["session_id"])
+    return wanted
+
+
+def _resume_all_answers() -> None:
+    """At startup: the reviewing sessions a restart left without their answers that someone waits for
+    (_startup_sessions), and any whose uncertain Work send is recorded on its deck (read back, never sent again)."""
+    wanted = _startup_sessions()
+    conn = db.connect()
+    try:
+        for session in conn.execute(
+                "SELECT * FROM exam_sessions WHERE status = 'reviewing' AND document_id IS NOT NULL"):
+            if (wanted is None or session["id"] in wanted
+                    or any(_work_recovery_job_id(row) for row in _deck_question_rows(conn, session["id"]))):
+                _resume_answers(conn, session)
+    finally:
+        conn.close()
+
+
+# How often each session's batch has raised outside every handler since this process started (_record_batch_crash).
+# ponytail: in memory, so a restart counts from zero again; persist it on the session if restarts ever loop on it.
+_batch_crashes: dict[int, int] = {}
+
+
+def _record_batch_crash(conn, session_id: int, doc_id: int, error: Exception) -> None:
+    """The batch raised outside every handler RESUME_LIMIT times (a page file that does not match its record, an
+    unreadable state file, a database that stays locked): leave the failure on every unanswered row, and a
+    whole-booklet row when there is none.
+
+    Until 2026-11-17 the thread died with nothing written, every time: the glasses were told "the answers are being
+    made" for good, and every poll started the thread again. The first crashes still end that way, because the
+    restart is what reads a received reply back. Written while the session is still marked as running, so no poll
+    starts a second batch in between. A failure to write it is logged; the thread ends either way.
+    """
+    try:
+        conn.rollback()
+        session = conn.execute("SELECT * FROM exam_sessions WHERE id = ?", (session_id,)).fetchone()
+        if session is None or _session_phase(session) != "reviewing":
+            return
+        rows = _deck_question_rows(conn, session_id)
+        if not rows:
+            _insert_deck(conn, session_id, doc_id, [ProblemUnit(
+                None, "", start_page_index=0, page_indexes=list(range(_exam_total_pages(conn, doc_id))))])
+            rows = _deck_question_rows(conn, session_id)
+        for row in rows:
+            if _latest_solution_row(conn, row["id"]) is None:
+                _record_solve_failure(conn, row, error, commit=False)
+        conn.commit()
+    except Exception as second:  # noqa: BLE001 - nothing more can be written from here
+        print(json.dumps({"event": "batch_crash_unrecorded", "session_id": session_id,
+                          "type": type(error).__name__, "while_recording": type(second).__name__}), flush=True)
+
+
+def _solve_deck_in_background(session_id: int, doc_id: int) -> None:
+    conn = db.connect()
+    try:
+        if os.environ.get("ROKID_SOLVER", "").strip() == "chatgpt-work":
+            try:
+                work_binding(session_id)
+            except WorkConflict:
+                return
+        while True:
+            session = _exam_session_or_404(conn, session_id)
+            closed = _route_closed_count(conn, session_id)
+            if not _answer_deck(conn, session, session_id, doc_id):
+                break
+            if _route_closed_count(conn, session_id) > closed:
+                continue  # A route just closed: the next one takes the same booklet now.
+            latest = _exam_session_or_404(conn, session_id)
+            if (latest["exam_type"] != "mixed" or latest["analysis_stage"] != "awaiting_audio"
+                    or not _mixed_work_pending(conn, latest)):
+                return
+        if not _deck_question_rows(conn, session_id):
+            _insert_deck(conn, session_id, doc_id, _fallback_problems(
+                conn, doc_id, _exam_total_pages(conn, doc_id)))
+            conn.commit()
+        _solve_deck(conn, session, session_id, doc_id, bundle_items=True)
+    except Exception as error:  # noqa: BLE001 - the booklet ends with a sentence, not with a thread that dies for good
+        with _background_solves_lock:
+            crashes = _batch_crashes[session_id] = _batch_crashes.get(session_id, 0) + 1
+        if crashes < RESUME_LIMIT:
+            # As before: the next poll starts the batch again, and a reply that was already received (a database
+            # locked at its commit) is read back from its chat or the CLI's kept reply, not asked for again.
+            raise
+        _record_batch_crash(conn, session_id, doc_id, error)
+    finally:
+        with _background_solves_lock:
+            _background_solves.discard(session_id)
+        # A bind may have observed the old worker just before it ended. Release
+        # ownership, then read committed state once: it or the bind starts the
+        # next worker, while the per-session set prevents a duplicate.
+        try:
+            conn.rollback()
+            latest = _exam_session_or_404(conn, session_id)
+            if session_id in _resolving:
+                # This batch read the booklet again after a retake. Whatever came of it, the wait is over: with
+                # nothing new saved the answers from before are given again (a failure moved the revision on).
+                _resolving.discard(session_id)
+                if _retake_close(conn, session_id):
+                    conn.commit()
+            elif _retake_open(latest) and _session_phase(latest) == "reviewing":
+                # The retake's capture ended while this batch, begun before it, still ran (its second read): the
+                # booklet is read again now.
+                with _background_solves_lock:
+                    waiting = session_id not in _background_solves
+                    if waiting:
+                        _background_solves.add(session_id)
+                if waiting:
+                    threading.Thread(target=_solve_deck_in_background, args=(session_id, doc_id),
+                                     name=f"solve-session-{session_id}", daemon=True).start()
+            active = True
+            if os.environ.get("ROKID_SOLVER", "").strip() == "chatgpt-work":
+                try:
+                    work_binding(session_id)
+                except WorkConflict:
+                    active = False
+            if active and latest["exam_type"] == "mixed" and latest["analysis_stage"] == "awaiting_audio" and latest["audio_path"]:
+                _resume_answers(conn, latest)
+        finally:
+            conn.close()
+
 @app.post("/v1/exam-sessions/{session_id}/finalize-reading")
-def exam_finalize_reading(session_id: int) -> dict:
+def exam_finalize_reading(session_id: int, solve: Literal["background"] | None = None) -> dict:
     """Declare 読取完了 (finish_reading = double tap): the reading phase is over.
 
     From here the camera stays closed, so the privacy LED is dark for the
@@ -2721,10 +5037,21 @@ def exam_finalize_reading(session_id: int) -> dict:
     """
     conn = db.connect()
     try:
+        # Claim the mode before reading it, so a concurrent switch cannot select another solver path.
+        conn.execute("BEGIN IMMEDIATE")
         session = _exam_session_or_404(conn, session_id)
         doc_id = _require_document_exam(session)
         total_pages = _exam_total_pages(conn, doc_id)
         locked = session["mode"] == "real" and not config.ALLOW_REAL_EXAM_SOLVE
+        solver_env = (os.environ.get("ROKID_SOLVER") or "").strip()
+        background = ((solve == "background" or session["exam_type"] == "mixed") and not locked and total_pages > 0
+                      and solver_env not in ("", "local"))
+        # A batch still analysing has no deck rows yet, so the claim below would
+        # take the session again; a running batch owns it instead.
+        with _background_solves_lock:
+            busy = session_id in _background_solves
+            if background and not busy:
+                _background_solves.add(session_id)
 
         # Atomically claim the transition: the guarded UPDATE takes SQLite's
         # write lock, so of two racing requests exactly one sees rowcount==1
@@ -2735,86 +5062,41 @@ def exam_finalize_reading(session_id: int) -> dict:
         # The deck predicate must mirror _deck_question_rows: legacy deck rows
         # carry only {"page_indexes": ...} (no "deck" key) and still count —
         # missing them here would re-segment a finalized session's deck.
-        claim = conn.execute(
-            "UPDATE exam_sessions SET status = 'reviewing' "
-            "WHERE id = ? AND (status != 'reviewing' "
-            "  OR NOT EXISTS (SELECT 1 FROM questions q "
-            "                 WHERE q.session_id = exam_sessions.id "
-            "                 AND (q.structure_json LIKE '%\"deck\"%' "
-            "                      OR q.structure_json LIKE '%\"page_indexes\"%')))",
-            (session_id,),
-        )
-        already_finalized = claim.rowcount == 0
+        already_finalized = True
+        # Pages taken again after the answers were read: the reading is claimed again although its deck exists, and
+        # also beside a batch that still runs from before (its end starts the new one, _solve_deck_in_background).
+        if not busy or _retake_open(session):
+            claim = conn.execute(
+                "UPDATE exam_sessions SET status = 'reviewing' "
+                "WHERE id = ? AND (status != 'reviewing' "
+                "  OR NOT EXISTS (SELECT 1 FROM questions q "
+                "                 WHERE q.session_id = exam_sessions.id "
+                "                 AND (q.structure_json LIKE '%\"deck\"%' "
+                "                      OR q.structure_json LIKE '%\"page_indexes\"%')))",
+                (session_id,),
+            )
+            already_finalized = claim.rowcount == 0
         reverted = False
 
         if already_finalized:
             conn.rollback()  # nothing claimed; end the implicit transaction
         else:
-            # Segment and insert the deck in the SAME transaction as the claim.
-            page_rows = conn.execute(
-                "SELECT page_index, ocr_text, vision_text, image_path FROM pages "
-                "WHERE document_id = ? ORDER BY page_index",
-                (doc_id,),
-            ).fetchall()
-            problems = segment_problems(
-                [
-                    # Body drives boundaries; the figure reading is appended
-                    # to the owning problem so its labels don't split it.
-                    (r["page_index"], r["ocr_text"] or "", r["vision_text"] or (
-                        f"Page {r['page_index'] + 1}: OCR unavailable. "
-                        "Read the questions and diagrams from the original page image."
-                        if r["image_path"] and not (r["ocr_text"] or "").strip()
-                        and (config.REAL_MODE or os.environ.get("ROKID_ANALYZER") == "client-ocr")
-                        else None
-                    ))
-                    for r in page_rows
-                ]
-            )
-            if not problems:
-                # Nothing recognizable was read: give the claim back in the
-                # SAME transaction so the session stays in the reading phase —
-                # the ack's 再読取 guidance is then actually possible (re-scan
-                # the pages, double-tap again). Racing double-fires serialize
-                # on the write lock and revert identically (idempotent).
-                conn.execute(
-                    "UPDATE exam_sessions SET status = 'open' WHERE id = ?",
-                    (session_id,),
-                )
-                reverted = True
-            for prob in problems:
-                subject, subj_conf = detect_subject(prob.body_text)
-                primary_page = conn.execute(
-                    "SELECT image_path FROM pages "
-                    "WHERE document_id = ? AND page_index = ?",
-                    (doc_id, prob.start_page_index),
-                ).fetchone()
-                primary_image_path = (
-                    primary_page["image_path"] if primary_page is not None else None
-                )
-                conn.execute(
-                    """INSERT INTO questions
-                       (session_id, question_no, body_text, choices_json, subject,
-                        read_conf, page_number, structure_json, image_path)
-                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-                    (
-                        session_id,
-                        # The boundary-less fallback problem gets a stable
-                        # synthesized id so the onboard ingest can address it
-                        # (a NULL problem_no would be unreachable by name).
-                        prob.question_no or "全体",
-                        prob.body_text,
-                        json.dumps(prob.choices, ensure_ascii=False),
-                        subject,
-                        round(min(1.0, 0.5 + subj_conf / 2), 3)
-                        if normalize_ocr_text(prob.body_text)
-                        else 0.0,
-                        prob.start_page_index + 1,
-                        json.dumps(
-                            {"page_indexes": prob.page_indexes, "deck": True}
-                        ),
-                        primary_image_path,
-                    ),
-                )
+            if not background and session["exam_type"] != "mixed":
+                # Segment and insert the deck in the SAME transaction as the claim.
+                # (A background batch asks the model for the 小問 instead, RP-12.)
+                problems = _ocr_problems(conn, doc_id)
+                if not problems:
+                    # Nothing recognizable was read: give the claim back in the
+                    # SAME transaction so the session stays in the reading phase —
+                    # the ack's 再読取 guidance is then actually possible (re-scan
+                    # the pages, double-tap again). Racing double-fires serialize
+                    # on the write lock and revert identically (idempotent).
+                    conn.execute(
+                        "UPDATE exam_sessions SET status = 'open' WHERE id = ?",
+                        (session_id,),
+                    )
+                    reverted = True
+                _insert_deck(conn, session_id, doc_id, problems)
             conn.commit()
 
         # Optional server-side solve-all — resumable: solve every deck problem
@@ -2823,120 +5105,18 @@ def exam_finalize_reading(session_id: int) -> dict:
         # unset or 'local': the placeholder does not really solve, and junk
         # rows would mark problems "solved" and shadow the onboard ingest.
         server_solved = 0
-        solver_env = (os.environ.get("ROKID_SOLVER") or "").strip()
-        if not locked and solver_env and solver_env != "local":
-            # Context is scoped to each problem's own 大問 (plan.md contract 1),
-            # not the whole document: every prompt is prefilled per question, so
-            # the whole booklet per 小問 is paid for once per 小問.
-            page_windows = _group_page_indexes(conn, session_id)
-            source_pages = _document_source_pages(conn, doc_id, session_id)
-            for row in _deck_question_rows(conn, session_id):
-                if _latest_solution_row(conn, row["id"]) is not None:
-                    continue
-                claim_token = _claim_server_solve(conn, row["id"])
-                if not claim_token:
-                    continue
-                try:
-                    with _claim_heartbeat(
-                        lambda: _renew_server_solve_claim(row["id"], claim_token),
-                        name=f"solve-claim-{row['id']}",
-                    ):
-                        start_index = (row["page_number"] or 1) - 1
-                        doc_material = _document_material(
-                            conn, doc_id, start_index, page_windows.get(row["id"])
-                        )
-                        retrieved = retrieve_context(conn, row["body_text"])
-                        context = _exam_prompt_context(
-                            session, doc_material, retrieved["context"]
-                        )
-                        window = page_windows.get(row["id"]) or _row_page_indexes(row)
-                        question = Question(
-                            question_no=row["question_no"],
-                            body_text=row["body_text"],
-                            choices=json.loads(row["choices_json"] or "[]"),
-                            subject=row["subject"],
-                            context=context,
-                            image_path=row["image_path"],
-                            image_paths=_page_image_paths(conn, doc_id, window),
-                            required_image_paths=[
-                                p["image_path"] for p in source_pages
-                                if p["page_number"] - 1 in (window or []) and p["image_path"]
-                                and not _page_material(p["ocr_text"], p["vision_text"])
-                            ],
-                            # Listening: the recording itself, not only its
-                            # transcript. A solver that takes audio hears the
-                            # speaker turns and numbers a transcript flattens.
-                            audio_path=session["audio_path"],
-                            # One session is one paper, so one chat. Never the
-                            # row's `subject`: that is a per-row heuristic.
-                            chat_key=f"session:{session_id}",
-                            # The whole booklet, attached once per chat, and
-                            # where this question sits inside it.
-                            document_image_paths=_document_image_paths(conn, doc_id),
-                            document_pages=source_pages,
-                            document_id=str(doc_id),
-                            audio_transcript=session["transcript"] or "",
-                            question_id=f"q{row['id']}",
-                            page_numbers=[i + 1 for i in (window or [])],
-                            # What the operator writes on the answer sheet, and
-                            # nothing else. This is the documented contract
-                            # (Solver 1.3.0) and was never set on this path.
-                            answer_only=True,
-                        )
-                        try:
-                            result, solver = solve_with_fallback(question=question)
-                        except Exception as error:  # noqa: BLE001 - retain resumable failures
-                            _record_solve_failure(conn, row, error)
-                            if isinstance(error, ChatGptWebUncertain):
-                                break  # Do not touch the browser for the remaining questions.
-                            continue
-                    served_by = result.extras.get("served_by", solver.name)
-                    if served_by == "local":
-                        # A failed/missing cloud adapter fell back to the
-                        # placeholder. Release the claim for a future retry,
-                        # but never mark placeholder output as solved.
-                        continue
-                    evidence_pages, evidence_refs = _prepare_result_evidence(
-                        result,
-                        fallback_pages=_question_evidence_pages(conn, row["id"]),
-                        fallback_refs=_question_evidence_refs(conn, row["id"]),
-                    )
-                    # Onboard ingest may answer while the paid call is in
-                    # flight. The conditional insert preserves that earlier
-                    # answer; the DB claim above already prevented a second
-                    # server request (and its duplicate charge).
-                    cur = conn.execute(
-                        """INSERT INTO solutions
-                           (question_id, solver_name, answer, solution_steps_json,
-                            rationale, cautions, answer_conf, rationale_conf,
-                            evidence_pages_json, evidence_refs_json,
-                            raw_reasoning, served_by, diagrams_json, answer_metadata_json)
-                           SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
-                           WHERE NOT EXISTS
-                               (SELECT 1 FROM solutions WHERE question_id = ?)""",
-                        (
-                            row["id"],
-                            solver.name,
-                            result.answer,
-                            json.dumps(result.solution_steps, ensure_ascii=False),
-                            result.rationale,
-                            result.cautions,
-                            result.answer_confidence,
-                            result.rationale_confidence,
-                            json.dumps(evidence_pages),
-                            _evidence_refs_storage_value(result),
-                            result.raw_reasoning,
-                            served_by,
-                            json.dumps(result.diagrams, ensure_ascii=False),
-                            json.dumps({k: result.extras.get(k) for k in ("answer_status", "missing_material")}, ensure_ascii=False),
-                            row["id"],
-                        ),
-                    )
-                    conn.commit()
-                    if cur.rowcount:
-                        server_solved += 1
-                finally:
-                    _release_server_solve(conn, row["id"], claim_token)
+        solving = None
+        if background or (busy and solve == "background"):
+            # RP-15: return at once; the glasses poll answer-bundle and read
+            # each 小問 as it is saved.
+            solving = "background"
+            if not busy:
+                threading.Thread(
+                    target=_solve_deck_in_background, args=(session_id, doc_id),
+                    name=f"solve-session-{session_id}", daemon=True,
+                ).start()
+        elif not locked and not busy and solver_env not in ("", "local"):
+            server_solved = _solve_deck(conn, session, session_id, doc_id)
 
         deck = _exam_deck(conn, session_id)
         if locked:
@@ -2957,6 +5137,7 @@ def exam_finalize_reading(session_id: int) -> dict:
             "total_pages": total_pages,
             "problem_count": len(deck),
             "server_solved": server_solved,
+            **({"solving": solving} if solving else {}),
             "locked": locked,
             "problems": deck,
             # The camera is off either way at this instant (the double tap
@@ -2975,6 +5156,40 @@ def exam_finalize_reading(session_id: int) -> dict:
         if not already_finalized:
             body["reading_ack"] = build_reading_done_ack(len(deck), total_pages)
         return body
+    finally:
+        conn.close()
+
+
+@app.post("/v1/exam-sessions/{session_id}/retake")
+def exam_retake(session_id: int) -> dict:
+    """The wearer takes pages again after reading the answers: the booklet takes pages again.
+
+    The glasses call this before they send the first page taken again (the last net; what the phone can tell by
+    itself is asked before anything is sent, ``capture_check``). The booklet and the reading are open again: a page
+    sent under its own number takes that page's place, and the two finalize calls end the capture as at the first
+    end. The booklet is then read again whole and its answers go over the questions that were shown
+    (``_answer_booklet``). From this call until those answers are saved, or that reading has given up, no answers
+    are given. Asked again before the capture has ended, it changes nothing.
+    """
+    conn = db.connect()
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        session = _exam_session_or_404(conn, session_id)
+        doc_id = _require_document_exam(session)
+        document = conn.execute("SELECT status FROM documents WHERE id = ?", (doc_id,)).fetchone()
+        if _retake_open(session) and _session_phase(session) == "reading" and document["status"] == "open":
+            conn.rollback()
+            return {"session_id": session_id, "document_id": doc_id, "already": True}
+        if (session["analysis_stage"] != "single" or _session_phase(session) != "reviewing"
+                or not any(_latest_solution_row(conn, row["id"]) for row in _deck_question_rows(conn, session_id))):
+            raise HTTPException(status_code=409, detail="this reading has no answers to take pages again for")
+        mark = conn.execute("SELECT COALESCE(MAX(id), 0) FROM solutions").fetchone()[0]
+        conn.execute("UPDATE documents SET status = 'open' WHERE id = ?", (doc_id,))
+        conn.execute("UPDATE exam_sessions SET status = 'open', retake_json = ? WHERE id = ?",
+                     (json.dumps({"mark": mark, "state": "open"}), session_id))
+        conn.commit()
+        print(json.dumps({"event": "retake", "session_id": session_id, "document_id": doc_id}), flush=True)
+        return {"session_id": session_id, "document_id": doc_id, "already": False}
     finally:
         conn.close()
 
@@ -3008,6 +5223,14 @@ _PROBLEM_NO_SUFFIX_RE = re.compile(r"\(\d+\)$")
 
 def _base_problem_no(no: str | None) -> str:
     return _PROBLEM_NO_SUFFIX_RE.sub("", no or "")
+
+
+def _printed_label(row) -> str:
+    """The question's number as the paper prints it. A number that repeats in a booklet is stored with "(2)", "(3)"
+    after it (unique_question_numbers); a paper prints "(1)", "(2)" of its own. The row's body keeps the label as it
+    was given, so a number the body ends with carries no mark of ours (2026-11-17: "1 (1)" was shown as "1 ")."""
+    no = row["question_no"] or ""
+    return no if no and (row["body_text"] or "").endswith(no) else _base_problem_no(no)
 
 
 @app.post("/v1/exam-sessions/{session_id}/solutions")
@@ -3143,7 +5366,7 @@ def exam_ingest_solutions(session_id: int, payload: IngestSolutions) -> dict:
                 (
                     question_id,
                     "onboard",
-                    item.answer.strip(),
+                    item.answer.strip("\r\n"),
                     json.dumps(item.solution_steps, ensure_ascii=False),
                     item.rationale,
                     item.cautions,
@@ -3215,6 +5438,27 @@ def exam_list_solutions(session_id: int) -> dict:
         conn.close()
 
 
+_MAX_ANSWER_BUNDLE_JSON_BYTES = 64 * 1024 * 1024
+_MAX_ANSWER_BUNDLE_TEXT_CHARS = 24 * 1024 * 1024
+
+
+def _check_answer_bundle_capacity(bundle: dict) -> None:
+    # Match AnswerBundle's UTF-16 text and canonical UTF-8 wire budgets. Work
+    # retains two 8 MiB stage results; mathematical scripts may expand to 3-byte glyphs.
+    items = bundle["items"]
+    characters = sum(len((item["answer"] + item["issue"]).encode("utf-16-le")) // 2 for item in items)
+    if len(items) > 2000 or characters > _MAX_ANSWER_BUNDLE_TEXT_CHARS:
+        raise HTTPException(status_code=413, detail="the complete answer exceeds the reader text capacity")
+    encoder = json.JSONEncoder(ensure_ascii=False, allow_nan=False, separators=(",", ":"))
+    size = 0
+    persisted = {**bundle, "items": [{"diagrams": [], "answer_no": [], **item} for item in items]}
+    for chunk in encoder.iterencode(persisted):
+        # Android JsonWriter escapes JavaScript line separators on offline save.
+        size += len(chunk.replace("\u2028", "\\u2028").replace("\u2029", "\\u2029").encode("utf-8"))
+        if size > _MAX_ANSWER_BUNDLE_JSON_BYTES:
+            raise HTTPException(status_code=413, detail="the complete answer exceeds the reader byte capacity")
+
+
 @app.get("/v1/exam-sessions/{session_id}/answer-bundle")
 def exam_answer_bundle(session_id: int) -> dict:
     """One complete snapshot the glasses read offline.
@@ -3222,6 +5466,99 @@ def exam_answer_bundle(session_id: int) -> dict:
     The schema is AnswerBundle's, parsed by
     android-relay/relaycore/.../study/AnswerBundle.java. It has no way to say
     "locked" or "still reading", so those are 409s rather than a partial body.
+    """
+    return _answer_snapshot(session_id, identify=True)
+
+
+def _ungathered_pages(conn, document_id: int | None) -> list[int]:
+    """Printed-order numbers (from 1) of the recorded pages that were read as the one frame they arrived as.
+
+    A page of source kind ``clip_frame`` with no clip of that capture in status ``done``: its clip failed, was still
+    waiting when finalization went on, or never reached the server. A still (``native_still``) is never one of these.
+    """
+    done = {(row["page_index"], row["capture_id"]) for row in conn.execute(
+        "SELECT page_index, capture_id FROM page_clips WHERE document_id = ? AND status = 'done'", (document_id,))}
+    numbers = []
+    for row in conn.execute("SELECT page_index, capture_metadata_json FROM pages WHERE document_id = ? "
+                            "AND capture_metadata_json IS NOT NULL ORDER BY page_index", (document_id,)):
+        capture = page_clips.provenance_of(row["capture_metadata_json"])
+        if capture.get("source_kind") == "clip_frame" and (row["page_index"], capture.get("capture_id")) not in done:
+            numbers.append(row["page_index"] + 1)
+    return numbers
+
+
+def _retake_pages(conn, document_id: int | None, groups: list[dict], items: list[dict]) -> list[int]:
+    """The captures (numbers from 1) to take again, for the glasses to show after the answers: at most 100.
+
+    A recorded page that stayed the one frame it arrived as; and the pages named by a question that has no answer
+    for want of material, or whose two reads differ or of which only one read gave an answer (the notes the Codex
+    route's comparison leaves all begin with 2回). Until 2026-11-19 each of these was a sentence among the answers.
+    The phone asks for what it can tell by itself before anything is sent (``capture_check``); this is what only
+    the reading could tell. A question that named no page of its own stands for every page and names none here.
+    """
+    pages = set(_ungathered_pages(conn, document_id))
+    count = conn.execute("SELECT COUNT(*) FROM pages WHERE document_id = ?", (document_id,)).fetchone()[0]
+    rows = [row for group in groups for row in group["items"]]
+    for row, item in zip(rows, items):
+        if item["status"] == "needs_input" or (item["status"] == "needs_review" and item["issue"].startswith("2回")):
+            named = _row_page_indexes(row)
+            if not (len(named) == count and count > 2):
+                pages.update(index + 1 for index in named if 0 <= index < count)
+    return sorted(pages)[:100]
+
+
+def _unnamed_pages(conn, document_id: int | None, groups: list[dict]) -> list[int]:
+    """Captured pages (from 1) that no item of the booklet's deck names.
+
+    A reply can be valid and cover only part of the booklet; until 2026-11-17 it was stored as the whole answer.
+    Only a deck whose every item carries its pages can tell (``_insert_deck``): for any other the list is empty. An
+    item that named no page stands for all of them (``_model_problems``), so one such item hides every gap, and a
+    page that holds no question (a cover) is listed too: this is a prompt to compare, not a verdict.
+    """
+    named: set[int] = set()
+    for row in (row for group in groups for row in group["items"]):
+        try:
+            metadata = json.loads(row["structure_json"] or "{}")
+        except (ValueError, TypeError):
+            return []
+        if not (isinstance(metadata, dict) and metadata.get("deck") is True
+                and isinstance(metadata.get("page_indexes"), list)):
+            return []
+        named.update(index for index in metadata["page_indexes"] if isinstance(index, int))
+    return [row["page_index"] + 1 for row in conn.execute(
+        "SELECT page_index FROM pages WHERE document_id = ? ORDER BY page_index", (document_id,))
+        if row["page_index"] not in named]
+
+
+def _unnamed_pages_item(numbers: list[int]) -> dict:
+    """One item behind the answers, in the group of the capture notices and in their form (``_ungathered_item``)."""
+    return {"group_id": "pages", "group_label": "撮影の確認", "question_id": "pages-unanswered",
+            "question_label": "答えのない頁", "answer": "（解答なし）", "status": "needs_review",
+            "issue": f"{'、'.join(map(str, numbers))}頁の答えがありません。撮影範囲と照合してください"}
+
+
+def _marked(conn, groups: list[dict], mark: str) -> bool:
+    """Whether an answer of this booklet carries this mark of its route (codex-cli) in what is kept with it."""
+    for row in (row for group in groups for row in group["items"]):
+        solution = _latest_solution_row(conn, row["id"])
+        try:
+            if solution is not None and json.loads(solution["answer_metadata_json"] or "{}").get(mark) is True:
+                return True
+        except (ValueError, TypeError, AttributeError):
+            continue
+    return False
+
+
+def _read_once(conn, groups: list[dict]) -> bool:
+    """Whether an answer of this booklet comes from one read where two were asked for (codex-cli)."""
+    return _marked(conn, groups, "read_once")
+
+
+def _answer_snapshot(session_id: int, *, identify: bool) -> dict:
+    """The answer bundle. ``identify=False`` leaves ``input_digest`` empty and reads no page file.
+
+    The digest hashes every page's content on purpose (no stat-only cache; see ``file_sha256``). The watcher's poll
+    never used it and paid for it twice a second: 40 PNG pages are 575 MB a poll (review C-10).
     """
     conn = db.connect()
     try:
@@ -3235,23 +5572,71 @@ def exam_answer_bundle(session_id: int) -> dict:
         if session["mode"] == "real" and not config.ALLOW_REAL_EXAM_SOLVE:
             raise HTTPException(status_code=409, detail="real-mode answers are locked")
         groups = _answer_groups(conn, session_id)
+        running = _resume_answers(conn, session)
+        again = _retake_round(session)
+        if again is not None and again.get("state") == "open":
+            # Pages were taken again and the booklet is being read with them: not the answers from before.
+            raise HTTPException(status_code=409, detail="the answers are being made")
         if not groups:
+            # The send gate keeps the booklet and writes nothing (_answer_deck): say that, not "no problems".
+            gated = ((os.environ.get("ROKID_SOLVER") or "").strip() in _SEND_GATED_ROUTES
+                     and not chatgpt_send_enabled())
             raise HTTPException(
                 status_code=409,
-                detail="no problems were detected in this document",
+                detail="the answers are being made" if running or session_id in _background_solves
+                else "sending is not authorized" if gated
+                else "no problems were detected in this document",
             )
         items = [
             _answer_bundle_item(conn, group, row)
             for group in groups
             for row in group["items"]
         ]
-        return {
-            "schema_version": 2 if any(i.get("diagrams") for i in items) else 1,
+        # Only beside answers: a failed or pending booklet says that, and "no page has an answer" tells nothing.
+        # Off unless ROKID_UNNAMED_PAGES_NOTICE=1: the item makes a booklet with a cover page "not all ready" for
+        # the PC bench (scripts/run_exam_deck.py) and changes bundles that tests outside this change pin.
+        unnamed = (_unnamed_pages(conn, session["document_id"], groups)
+                   if os.environ.get("ROKID_UNNAMED_PAGES_NOTICE") == "1"
+                   and any(item["status"] in ("ready", "needs_review") for item in items) else [])
+        # Nothing but the paper's questions (the operator, 2026-11-19: no explanations among the answers). The pages
+        # to take again are numbers of their own; that pages were reduced, or that one read answered alone, stays
+        # with the answers on the server.
+        retake = (_retake_pages(conn, session["document_id"], groups, items)
+                  if session["analysis_stage"] == "single" else [])
+        if again is not None:
+            # An answer the wearer had before pages were taken again, unchanged: the glasses show what is new first.
+            for row, item in zip((row for group in groups for row in group["items"]), items):
+                before = conn.execute("SELECT answer, answer_metadata_json FROM solutions WHERE question_id = ? "
+                                      "AND id <= ? ORDER BY id DESC LIMIT 1", (row["id"], again["mark"])).fetchone()
+                now = _latest_solution_row(conn, row["id"])
+                if item["status"] == "ready" and before is not None and now is not None and before["answer"] == now["answer"]:
+                    try:
+                        kept = json.loads(before["answer_metadata_json"] or "{}")
+                    except (ValueError, TypeError):
+                        kept = {}
+                    if kept.get("answer_status") != "needs_input" and not kept.get("review_note"):
+                        item["seen"] = True
+        if unnamed:
+            items.append(_unnamed_pages_item(unnamed))
+        # One read's answers are shown. While their route still compares them with its other read, the bundle says
+        # so (the glasses show "…"); once it does not, the mark goes. That second state has a revision of its own:
+        # a comparison can end with nothing saved (the route failed behind its first read, or the server stopped),
+        # and the glasses are told of a change by the revision alone.
+        once = _read_once(conn, groups)
+        comparing = once and session_id in _comparing
+        bundle = {
+            "schema_version": max((diagram_schema_version(i.get("diagrams", [])) for i in items), default=1),
             "session_id": str(session_id),
-            "input_digest": _answer_input_digest(conn, session),
-            "revision": _answer_revision(conn, session_id),
+            "input_digest": _answer_input_digest(conn, session) if identify else "",
+            "revision": _answer_revision(conn, session_id) + int(once and not comparing),
+            "analysis_stage": session["analysis_stage"],
+            "available_stage": _available_stage(session, items),
+            **({"comparing": True} if comparing else {}),
+            **({"retake": retake} if retake else {}),
             "items": items,
         }
+        _check_answer_bundle_capacity(bundle)
+        return bundle
     finally:
         conn.close()
 

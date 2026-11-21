@@ -6,6 +6,7 @@ table must accept text-only pages (image_path=NULL) and have vision_text.
 """
 
 import importlib
+import json
 import sqlite3
 
 
@@ -63,6 +64,22 @@ def _make_legacy_db(path):
     )
     conn.commit()
     conn.close()
+
+
+def test_native_capture_metadata_is_nullable_on_legacy_upgrade_and_survives_reinit(tmp_path):
+    from app import db
+
+    path = tmp_path / "legacy-native.db"
+    _make_legacy_db(path)
+    db.init_db(path)
+    metadata = json.dumps({"capture_provenance": {"schema": 1}, "canonical_image_sha256": "a" * 64})
+    with db.connect(path) as conn:
+        assert conn.execute("SELECT capture_metadata_json FROM pages WHERE id=1").fetchone()[0] is None
+        conn.execute("UPDATE pages SET capture_metadata_json=? WHERE id=1", (metadata,))
+        conn.commit()
+    db.init_db(path)
+    with db.connect(path) as conn:
+        assert conn.execute("SELECT capture_metadata_json FROM pages WHERE id=1").fetchone()[0] == metadata
 
 
 def test_legacy_pages_image_path_becomes_nullable(tmp_path, monkeypatch):
@@ -165,3 +182,18 @@ def test_legacy_evidence_semantics_are_preserved(tmp_path, monkeypatch):
     ).fetchone()
     assert json.loads(sol2["evidence_pages_json"]) == [1, 2]
     conn.close()
+
+
+def test_analysis_stage_is_additive_and_preserves_an_existing_session(tmp_path, monkeypatch):
+    db_file = tmp_path / "legacy.db"
+    _make_legacy_db(db_file)
+    with sqlite3.connect(db_file) as conn:
+        conn.execute("INSERT INTO exam_sessions(id, mode) VALUES (7, 'mock')")
+    monkeypatch.setenv("ROKID_DATA_DIR", str(tmp_path))
+    from app import config, db
+    importlib.reload(config)
+    importlib.reload(db)
+    db.init_db(db_path=db_file)
+    db.init_db(db_path=db_file)
+    with sqlite3.connect(db_file) as conn:
+        assert conn.execute("SELECT mode, analysis_stage FROM exam_sessions WHERE id=7").fetchone() == ("mock", "single")

@@ -32,6 +32,7 @@ CREATE TABLE IF NOT EXISTS pages (
     -- (TEXT, not an image). Combined with ocr_text when solving so figure-
     -- dependent and page-spanning problems are answered from the whole material.
     vision_text TEXT,
+    capture_metadata_json TEXT,
     ocr_md5     TEXT,
     summary     TEXT,
     created_at  TEXT NOT NULL DEFAULT (datetime('now')),
@@ -55,6 +56,7 @@ CREATE TABLE IF NOT EXISTS exam_sessions (
     current_page_index INTEGER NOT NULL DEFAULT 0,
     audio_path         TEXT,      -- listening: recorded audio (その場で録音)
     transcript         TEXT,      -- listening: transcript (書き起こし or 与値)
+    analysis_stage     TEXT NOT NULL DEFAULT 'single',
     created_at    TEXT NOT NULL DEFAULT (datetime('now'))
 );
 
@@ -159,6 +161,29 @@ CREATE TABLE IF NOT EXISTS explain_claims (
     PRIMARY KEY (session_id, page_index, page_signature)
 );
 
+-- The clip a recorded page was cut from, and how far its gathering into the page's image has come (app/page_clips.py).
+-- status: stored | gathering | done | failed (with its reason). One clip a page: a retake replaces the row.
+CREATE TABLE IF NOT EXISTS page_clips (
+    document_id INTEGER,
+    page_index  INTEGER,
+    capture_id  TEXT,
+    sha256      TEXT,
+    bytes       INTEGER,
+    record_json TEXT,
+    status      TEXT,
+    reason      TEXT,
+    used        INTEGER,
+    total       INTEGER,
+    level       REAL,
+    created_at  REAL,
+    updated_at  REAL,
+    -- How often a worker took this clip up: one the server stopped on twice is given up (page_clips.requeue_interrupted).
+    attempts    INTEGER NOT NULL DEFAULT 0,
+    -- When the clip's file was removed because nothing reads it any more (app/retention.py); NULL while it is kept.
+    file_removed_at REAL,
+    PRIMARY KEY (document_id, page_index)
+);
+
 -- Hot-path lookups: latest solution per question (deck/review/view), a
 -- session's questions, and a document's pages. Runs on every init_db, so
 -- existing DBs pick these up too.
@@ -171,7 +196,9 @@ CREATE INDEX IF NOT EXISTS idx_pages_document     ON pages(document_id);
 def connect(db_path: Path | None = None) -> sqlite3.Connection:
     path = db_path or DB_PATH
     path.parent.mkdir(parents=True, exist_ok=True)
-    conn = sqlite3.connect(str(path))
+    # Thirty seconds for another writer, not sqlite's five: the gathering workers, the uploads and the finalization
+    # write this one file. The journal mode is left alone (diagnostic connections open the live file with mode=ro).
+    conn = sqlite3.connect(str(path), timeout=30)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA foreign_keys = ON")
     return conn
@@ -186,6 +213,10 @@ _EXAM_SESSION_MIGRATIONS = (
     ("current_page_index", "INTEGER NOT NULL DEFAULT 0"),
     ("audio_path", "TEXT"),
     ("transcript", "TEXT"),
+    ("analysis_stage", "TEXT NOT NULL DEFAULT 'single'"),
+    # The last time pages were taken again after the answers were read (main._retake_round); NULL for a booklet
+    # read once.
+    ("retake_json", "TEXT"),
 )
 
 # Additive result/cache metadata introduced after the original tables. Keeping
@@ -208,6 +239,10 @@ _TABLE_COLUMN_MIGRATIONS = {
     ),
     "explain_claims": (
         ("owner_token", "TEXT"),
+    ),
+    "page_clips": (
+        ("attempts", "INTEGER NOT NULL DEFAULT 0"),
+        ("file_removed_at", "REAL"),
     ),
 }
 
@@ -282,6 +317,8 @@ def _migrate(conn: sqlite3.Connection) -> None:
     pcols = {r[1] for r in conn.execute("PRAGMA table_info(pages)")}
     if "captured_at_ms" not in pcols:
         conn.execute("ALTER TABLE pages ADD COLUMN captured_at_ms INTEGER")
+    if "capture_metadata_json" not in pcols:
+        conn.execute("ALTER TABLE pages ADD COLUMN capture_metadata_json TEXT")
 
 
 def init_db(db_path: Path | None = None) -> None:

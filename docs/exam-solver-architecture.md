@@ -1,8 +1,63 @@
 # 入試問題ソルバー アーキテクチャ（解答モード）
 
-Status: Current architecture of the answer mode. Updated 2026-09-14.
-実装が正で、この文書はその地図です。食い違いを見つけたらコードを信じ、ここを直して
-ください。
+Status: Current architecture map。2026-09-23、基準実装 `7a05928`。後半の旧構成は履歴として保持。
+Runs on: 会場はglassdocとスマホAP／FastAPI／Chrome。PC試験は部品の検査。
+
+## 現在の本流と未接続部分
+
+目的・採否は [全体整理](requirements-audit.md)、実装の所在は [配置図](implementation-surfaces.md)、
+実行条件は [multimodal-scan](multimodal-scan.md)。実機試験・導入・GPT送信は停止中。
+
+```text
+グラス: 通常／リスニング選択
+  写真: GlassCamera 測光→AE収束→JPEG
+        → JapaneseOcr → DocScanControllerの候補順位・文字枠判定
+        → 実画像の可視ACK → 3秒確認 → ローカル保存 → 背景HTTP送信
+  音声: ListeningRecorder/Service → chunkのローカル保全 → 再送・完了要求
+                          ↓ スマホAP
+スマホFastAPI:
+  写真は向き補正・正規化PNG、音声は連続性確認・原音を保存
+  finalize-reading?solve=background → 冊子全体を1通で送信（小問の一覧と全解答を1つの返答に）
+    source_bundle: 冊子の全画像（JPEG、20枚超は2〜3頁結合）＋原音
+    ChatGptWebSolver → Chrome CDP → 1教科1チャット。返答の小問をdeckの行にして一度に保存
+  answer-bundle（入力digest・revision・各小問の状態／答案）
+                          ↓
+グラス: bundle取得 → AnswerStore → AnswerReader → AnswerView / AnswerLayout
+```
+
+これは**実装の接続図**であり、要求を満たしたという図ではない。
+
+- **品質の空白**: OCRは登録前だが、認識完了・文字数・文字枠は判読合格ではない。
+  PCの品質部品は正式登録ゲートに未接続。撮影前の紙面検出・画角校正も未完（CQ-5～9）。
+- **設問の空白**: background経路の小問一覧はモデルが原本から作る。OCRは分割に使わない
+  （同期finalizeの互換経路だけがOCR分割）。実冊子での一覧の過不足は未測定（RP-12）。
+- **配送**: 解析中のanswer-bundleは409「being made」、答えは返答が揃ってから一度に届く。
+  glassdocは30秒ごとに再取得し、AnswerReader.acceptで新しいdeckを受け入れる。
+- **受け入れの空白**: AP全経路、文字・数式・図表の正答、原音の実利用、実表示と長時間運用は未検証。
+  カメラAPIの終了は物理LED状態の測定ではない。
+
+## 入力と互換経路の境界
+
+| 対象 | 現在の扱い |
+|---|---|
+| GPTへの資料 | 全ページ画像＋リスニング原音を1通で送る。OCR全文・補正文・ローカル文字起こしは送らない |
+| 画像添付 | 画像のみ（フル解像度JPEG）。20枚超は2〜3頁を1枚に結合。PDFは使わない。欠落原本や未確認添付のまま送らない |
+| 同じ会話 | 原本の内容・ページ・原音・入力方式で同一性を判定。確認済み会話では添付生成を省く。原本／会話の変更と送信結果不明を同じ扱いにしない |
+| リスニング | 主経路はASRを起動・待機しない。原音保存・hash・sample・欠番・完了検査は残す。他provider向けASRは互換機能 |
+| solver | chatgpt-webが選択された主経路。API key経路は設定によるfallback。必要な音声を失うfallbackで成功扱いしない。REAL_MODEでplaceholderを許可しない |
+| 操作契約 | glassdocは自身の入力とanswer-bundleを使う。サーバのOPERATION_CONTRACT=phoneは凍結relayの公示であり、glassdocの操作を表していない（RP-21） |
+| 旧API | match、text-only upload、外部solutions ingest、review HUD、solve-current等は互換。目的の実機経路の代わりに拡張しない |
+
+設定値の詳細は `.env.example`、APIの実装は `app/main.py`、契約の版は `app/version.py` を参照する。
+本改訂はコード・schema・ジェスチャの変更を含まない。
+
+## 2026-09-14の構成説明（履歴、現在の手順ではない）
+
+<details>
+<summary>旧構成・旧API説明を表示。OCR優先資料・ASR必須・スマホ操作・サーバHUDの記述は本流から置き換わっています。</summary>
+
+以下は当時の設計説明を保持したもの。端末・プラットフォームに関する断定を新しい実装判断の根拠にせず、
+[撮影研究](rokid-capture-research.md)の一次資料と[実測記録](hardware-measurements.md)の対象tupleを確認する。
 
 既存の「ページ照合（資料化）」モードに、**未登録の入試問題を読み取って解答・根拠を返す**
 解答モードを追加した。設計は既存と同じ **ポート＆アダプタ＋レジストリ＋契約バージョニング**。
@@ -161,7 +216,7 @@ exam-session(document_id, exam_type, answer_format)
 | POST | `/v1/exam-sessions/{id}/solutions` | **外部で解いた問題別解答を ingest**（API 互換。`served_by="onboard"`・latest wins・real ロック） |
 | GET | `/v1/exam-sessions/{id}/solutions` | **レビューデッキ一覧**（問題番号・教科・解答済み・確信度。読取中は空デッキ） |
 | GET | `/v1/exam-sessions/{id}/review?index=&view_page=` | **問題別閲覧 HUD**（解答+解法+根拠+注意を一括1ストリーム・クランプ・未解答プレースホルダ） |
-| GET | `/v1/exam-sessions/{id}/answer-bundle` | **グラスのオフライン一括答案**（`schema_version`/`session_id`/`input_digest`/`revision`+`items[]`。deckの`question_no`から大問/小問を復元・グループに小問が無ければ`全問`1件を維持。読取中・realロック中は409。実機未検証。解答は表示可能なテキストへ変換して返し（LaTeXの分数・指数・添字・根号・ギリシャ文字・場合分け）、表・図・未対応記法が残る項目は`ready`にせず`needs_review`＋`issue`で返す。テキストは捨てない） |
+| GET | `/v1/exam-sessions/{id}/answer-bundle` | **グラスのオフライン一括答案**（`schema_version`/`session_id`/`input_digest`/`revision`+`items[]`。deckの`question_no`から大問/小問を復元・グループに小問が無ければ`全問`1件を維持。読取中・realロック中は409。実機未検証。解答は表示可能なテキストへ変換して返し（LaTeXの分数・指数・添字・根号・ギリシャ文字・場合分け）、表・図・未対応記法が残る項目は`ready`にせず`needs_review`＋`issue`で返す。テキストは捨てない。冊子に解答番号が印刷されていれば各項目が`answer_no`で持ち、返答にある最小と最大の番号の間で抜けた番号は`解答番号N`の`failed`項目として残す。末尾の抜けは検出できない） |
 | POST | `/v1/exam-sessions/{id}/mode` | **筆記 ⇄ リスニング** 切替（`{"exam_type":...}`） |
 | POST | `/v1/exam-sessions/{id}/audio` | **リスニング録音**アップロード（`audio`＋任意`transcript`）→ 書き起こし保存 |
 | POST | `/v1/exam-sessions/{id}/next-page` / `prev-page` | 文書ページ移動（二次経路。現在ページ ±1・クランプ・撮影なし） |
@@ -202,8 +257,8 @@ exam-session(document_id, exam_type, answer_format)
   **exam セッション**（`session:{id}` ＝ 1 冊＝ 1 科目）で、行ごとの
   `detect_subject` ではありません。ページを 1 回添付すればそのチャットの間ずっと
   残るので、小問ごとに上げ直さずに済みます。
-- **資料の添付** — 既定は全文OCR Markdown＋対象大問のページ画像です。
-  `ROKID_CHATGPT_INPUT_MODE=merged-images|pdf`で同じ資料の比較ができます。
+- **資料の添付** — 冊子の原本画像だけを送ります（OCR本文は送りません）。20枚を
+  超えると2〜3頁を1枚に結合します。PDFは使いません（Enterprise 以外は画像を捨てる）。
   リスニングの原音を含め20添付を数え、未確認添付のまま質問を送りません。
   図は検証したベクトルを保存し、answer-bundle schema 2で配送します。
   録音はglassdoc、端末内VAD/ASRはスマホ。設定とAPIは
@@ -211,8 +266,7 @@ exam-session(document_id, exam_type, answer_format)
 - **タブの再利用** — 質問ごとに `chatgpt.com` を読み込み直さず、1 枚のタブを使い回します。
 - **使用制限への防御** — 制限はメッセージ本文で通知され例外になりません。
   `ROKID_CHATGPT_RATE_LIMIT_MARKERS` に当たった返答は即座に打ち切り、再試行しません。
-  加えて、`ROKID_CHATGPT_SLOW_S` を超える生成が
-  `ROKID_CHATGPT_SLOW_STREAK` 回続いたら次の送信を止めます。
+  遅い生成で送信を止めるブレーキは 2026-09-29 に削除しました（1教科1通のため）。
 - **未確定の答えを確定させない** — 生成中の表示（thinking プレースホルダ）を
   解答として確定しません。
 
@@ -251,3 +305,5 @@ layout→subject→solver→HUD を流し、**設問抽出率/科目判定率/�
 解答は `glasses_view` のグラス内テキスト（段階・ページ送り）で読む。詳細は
 [glasses-ux-contract.md](glasses-ux-contract.md)、実機仕様は
 [cxr-l-integration.md](cxr-l-integration.md)。
+
+</details>

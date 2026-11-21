@@ -83,6 +83,105 @@ public class AnswerReaderTest {
         assertEquals("g1-q1", reader.current().questionId);
     }
 
+    @Test public void aLaterListeningRevisionCannotChangePrintedAnswerNumbers() {
+        AnswerItem reading = new AnswerItem("g1", "読解", "q1", "問1", "A", AnswerItem.Status.READY, "", List.of(), List.of(101));
+        AnswerReader reader = new AnswerReader(new AnswerBundle("session", "a".repeat(64), 1, List.of(reading)), 40, 3, String::length);
+        AnswerItem changed = new AnswerItem("g1", "読解", "q1", "問1", "A", AnswerItem.Status.READY, "", List.of(), List.of(102));
+        assertFalse(reader.accept(new AnswerBundle("session", "a".repeat(64), 2, List.of(changed))));
+        assertEquals(List.of(101), reader.current().answerNumbers);
+    }
+
+    @Test public void aRetryThatReplacesTheFailedRowWithTheModelsQuestionsIsShown() {
+        AnswerBundle failed = new AnswerBundle("session", "a".repeat(64), 2, List.of(
+                new AnswerItem("g1", "全体", "q5", "全問", "", AnswerItem.Status.PENDING,
+                        "ChatGPTへ送れませんでした。自動で再試行します")));
+        AnswerReader reader = new AnswerReader(failed, 4, 2, String::length);
+        AnswerBundle answered = new AnswerBundle("session", "a".repeat(64), 5, List.of(
+                AnswerItem.ready("g1", "第1問", "q6", "問1", "4"),
+                AnswerItem.ready("g1", "第1問", "q7", "問2", "2")));
+        assertTrue(reader.accept(answered));
+        assertEquals("q6", reader.current().questionId);
+        assertEquals("4", reader.current().answer);
+        assertFalse("an older snapshot never replaces it back",
+                reader.accept(new AnswerBundle("session", "a".repeat(64), 4, failed.items)));
+    }
+
+    /** The first of two reads, shown while it is still compared with the other: its answers and one notice. */
+    private AnswerBundle firstRead() {
+        return new AnswerBundle("session", "a".repeat(64), 1, List.of(
+                AnswerItem.ready("g1", "第1問", "q1", "問1", "abcdefghijkl"),
+                AnswerItem.ready("g2", "第2問", "q3", "問1", "mnopqrstuvwx"),
+                new AnswerItem("pages", "撮影の確認", "read-comparing", "照合中", "（待ち）",
+                        AnswerItem.Status.NEEDS_REVIEW, "1回目の読み")));
+    }
+
+    /** The compared answers: the notice gone, and a question only the second read listed in its place. */
+    private AnswerBundle compared() {
+        return new AnswerBundle("session", "a".repeat(64), 2, List.of(
+                AnswerItem.ready("g1", "第1問", "q1", "問1", "abcdefghijkl"),
+                new AnswerItem("g1", "第1問", "q9", "問2", "ウ", AnswerItem.Status.NEEDS_REVIEW, "1回だけが挙げた設問"),
+                AnswerItem.ready("g2", "第2問", "q3", "問1", "mnopqrstuvwx")));
+    }
+
+    @Test public void comparedAnswersThatAddAQuestionAndDropTheNoticeKeepTheWearersPlace() {
+        // Until 2026-11-18 a snapshot that kept some questions and not others was refused whole: the reader
+        // stayed on the first read's answers and its notice for good, and the phone asked again every five seconds.
+        for (boolean continuous : new boolean[]{false, true}) {
+            AnswerReader reader = new AnswerReader(firstRead(), 4, 2, String::length, continuous);
+            reader.restore("q3", 4);
+            int offset = reader.offset();
+            AnswerBundle next = compared();
+            assertTrue(reader.accept(next));
+            assertSame(next, reader.bundle());
+            assertEquals("q3", reader.current().questionId);
+            assertEquals(offset, reader.offset());
+            assertTrue(reader.page().sourceText.contains("qrst"));
+            assertFalse("the older snapshot never comes back", reader.accept(firstRead()));
+        }
+    }
+
+    @Test public void aNoticeBeingReadWhenItGoesLeavesTheReaderOnTheAnswerBeforeIt() {
+        for (boolean continuous : new boolean[]{false, true}) {
+            AnswerReader reader = new AnswerReader(firstRead(), 4, 2, String::length, continuous);
+            reader.restore("read-comparing", 2);
+            assertTrue(reader.accept(compared()));
+            assertEquals("q3", reader.current().questionId);
+            assertEquals(0, reader.offset());
+        }
+        // Before a view has given its size, as when the saved place is carried over to a fetched snapshot.
+        AnswerReader saved = new AnswerReader(firstRead(), true);
+        saved.restore("read-comparing", 2);
+        assertTrue(saved.accept(compared()));
+        assertEquals("q3", saved.current().questionId);
+        assertEquals(0, saved.offset());
+    }
+
+    @Test public void comparedAnswersMayRenumberGroupsButNeverReorderOrRenameAQuestion() {
+        List<AnswerItem> old = firstRead().items;
+        // Group ids are positions (g1, g2, ...): a question added in front of the first heading moves them all.
+        AnswerReader reader = new AnswerReader(firstRead(), 4, 2, String::length, true);
+        reader.restore("q3", 4);
+        assertTrue(reader.accept(new AnswerBundle("session", "a".repeat(64), 2, List.of(
+                AnswerItem.ready("g1", "全体", "q9", "問2（第2問）", "ウ"),
+                AnswerItem.ready("g2", "第1問", "q1", "問1", "abcdefghijkl"),
+                AnswerItem.ready("g3", "第2問", "q3", "問1", "mnopqrstuvwx")))));
+        assertEquals("q3", reader.current().questionId);
+        assertEquals(4, reader.offset());
+
+        AnswerItem added = AnswerItem.ready("g1", "第1問", "q9", "問2", "ウ");
+        assertFalse("reordered", new AnswerReader(firstRead(), true).accept(new AnswerBundle(
+                "session", "a".repeat(64), 2, List.of(old.get(1), added, old.get(0)))));
+        assertFalse("relabelled", new AnswerReader(firstRead(), true).accept(new AnswerBundle(
+                "session", "a".repeat(64), 2, List.of(old.get(0), added,
+                        AnswerItem.ready("g2", "第2問", "q3", "問5", "mnopqrstuvwx")))));
+        assertFalse("under another heading", new AnswerReader(firstRead(), true).accept(new AnswerBundle(
+                "session", "a".repeat(64), 2, List.of(old.get(0), added,
+                        AnswerItem.ready("g2", "第3問", "q3", "問1", "mnopqrstuvwx")))));
+        assertFalse("renumbered", new AnswerReader(firstRead(), true).accept(new AnswerBundle(
+                "session", "a".repeat(64), 2, List.of(old.get(0), added, new AnswerItem("g2", "第2問", "q3", "問1",
+                        "mnopqrstuvwx", AnswerItem.Status.READY, "", List.of(), List.of(7))))));
+    }
+
     @Test public void anAnswerNeedingReviewWarnsFirstAndStillShowsTheAnswer() {
         AnswerBundle bundle = new AnswerBundle("session", "a".repeat(64), 1, List.of(
                 new AnswerItem("g1", "大問1", "g1-q1", "(1)", "12",
@@ -91,5 +190,65 @@ public class AnswerReaderTest {
         List<String> lines = reader.page().lines;
         assertTrue(lines.get(0).startsWith("【要確認】"));
         assertTrue(String.join("", lines).contains("12"));
+    }
+
+    @Test public void continuousMillionsOfLinesRestoreAndReflowWithoutRetainingEveryPage() {
+        String answer = "x" + "\n".repeat(8_000_000);
+        AnswerBundle bundle = new AnswerBundle("session", "a".repeat(64), 1, List.of(
+                AnswerItem.ready("g", "g", "q", "q", answer)));
+        AnswerReader reader = new AnswerReader(bundle, 40, 3, String::length, true);
+        assertEquals(2_666_667, reader.pageCount());
+        reader.restore("q", answer.length() - 1);
+        assertEquals(reader.pageCount(), reader.pageNumber());
+        reader.backward();
+        reader.forward();
+        assertEquals(reader.pageCount(), reader.pageNumber());
+        int offset = reader.offset();
+        reader.viewport(40, 4, String::length);
+        assertEquals(2_000_000, reader.pageCount());
+        assertEquals(reader.pageCount(), reader.pageNumber());
+        assertEquals(offset, reader.offset());
+    }
+
+    @Test public void ordinaryMillionsOfLinesRestoreNearTheLastPage() {
+        String answer = "x" + "\n".repeat(8_000_000);
+        AnswerReader reader = new AnswerReader(new AnswerBundle("session", "a".repeat(64), 1,
+                List.of(AnswerItem.ready("g", "g", "q", "q", answer))), 40, 3, String::length);
+        reader.restore("q", answer.length() - 1);
+        assertEquals(2_666_667, reader.pageCount());
+        assertEquals(reader.pageCount(), reader.pageNumber());
+        assertEquals(answer.length(), reader.page().end);
+    }
+
+    @Test public void metadataOnlyReaderRestoresAndValidatesBeforeTheActualViewport() {
+        for (boolean continuous : new boolean[]{false, true}) {
+            AnswerReader reader = new AnswerReader(initial(), continuous);
+            reader.restore("g1-q1", 8);
+            assertFalse(reader.hasViewport());
+            assertEquals(8, reader.offset());
+            assertThrows(IllegalStateException.class, reader::page);
+            assertThrows(IllegalStateException.class, reader::pageCount);
+            assertNull(reader.diagram());
+            assertTrue(reader.accept(initial().withAnswer(
+                    AnswerItem.ready("g1", "大問1", "g1-q2", "(2)", "ウ"))));
+            assertEquals("g1-q1", reader.current().questionId);
+            assertEquals(8, reader.offset());
+            assertFalse(reader.hasViewport());
+            reader.viewport(4, 2, String::length);
+            assertTrue(reader.hasViewport());
+            assertEquals(8, reader.offset());
+        }
+    }
+
+    @Test public void invalidViewportPreservesDeferredAndDisplayedReaderState() {
+        AnswerReader reader = new AnswerReader(initial(), true);
+        assertThrows(IllegalArgumentException.class, () -> reader.viewport(0, 2, String::length));
+        assertFalse(reader.hasViewport());
+        reader.viewport(20, 2, String::length);
+        AnswerLayout.Page page = reader.page();
+        assertThrows(IllegalArgumentException.class, () -> reader.viewport(20, 0, String::length));
+        assertThrows(IllegalArgumentException.class, () -> reader.viewport(Float.NaN, 2, String::length));
+        assertThrows(IllegalArgumentException.class, () -> reader.viewport(20, 2, null));
+        assertSame(page, reader.page());
     }
 }

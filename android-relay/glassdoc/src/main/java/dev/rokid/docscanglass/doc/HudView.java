@@ -8,6 +8,9 @@ import android.graphics.ColorMatrixColorFilter;
 import android.graphics.Paint;
 import android.graphics.RectF;
 import android.graphics.Typeface;
+import android.text.Layout;
+import android.text.StaticLayout;
+import android.text.TextPaint;
 import android.view.View;
 
 import java.util.ArrayList;
@@ -16,7 +19,7 @@ import java.util.List;
 
 /**
  * The glasses display: black background, green monospace text, and either the
- * aiming mark or the still that was just taken.
+ * live camera image or the still that was just taken in a small corner.
  *
  * <p>It holds no session state. What to show is decided by the shared
  * {@code DocScanController} and arrives through {@link GlassesCaptureSurface},
@@ -24,13 +27,36 @@ import java.util.List;
  */
 final class HudView extends View {
     private static final int GREEN = Color.rgb(0x40, 0xFF, 0x5E);
+    /**
+     * Capture text and the aim mark sit in the operator's line of sight over
+     * the page (2026-09-30: "the text made it hard to shoot"). They clear this
+     * long after appearing; black is transparent on the glasses and draws no
+     * power. The corner still under review remains visible until commit.
+     */
+    static final long FADE_MILLIS = 1500;
+    private static final float CAPTURE_FRACTION = .30f;
+    private static final float CAPTURE_MARGIN = 8f;
 
     private final Paint paint = new Paint(Paint.ANTI_ALIAS_FLAG);
+    private final TextPaint statusPaint = new TextPaint(Paint.ANTI_ALIAS_FLAG);
     private final Paint guidePaint = new Paint(Paint.ANTI_ALIAS_FLAG);
     private final Paint previewPaint = new Paint(Paint.FILTER_BITMAP_FLAG);
+    private final Paint livePaint = new Paint(Paint.FILTER_BITMAP_FLAG);
 
     private List<String> lines = Collections.emptyList();
     private Bitmap preview;
+    private Bitmap livePreview;
+    private PaperGeometry.Box paperProposal; // provisional comparison, never a crop.
+    /**
+     * The paper of the live image in PaperCrop grid cells; null shows the whole camera frame. The camera sees
+     * about 77 by 94 degrees, several times the page the wearer looks at: "the view is wider than the frame on
+     * the display" (2026-09), "still too wide" (2026-11-12). The corner keeps its size and shows the paper.
+     */
+    private int[] liveBox;
+    private int liveMisses;
+    /** Frames without a paper box before the live image returns to the whole camera frame (about half a second). */
+    private static final int LIVE_MISSES = 5;
+    private boolean capturing;
     private boolean aiming;
     private double guideFraction = FramingGuide.UNCALIBRATED_FRACTION;
     private boolean spreadGuide;
@@ -38,8 +64,119 @@ final class HudView extends View {
     private Runnable hiddenFrame;
     private boolean frameReported;
     private boolean recording;
+    private boolean clipRecording;
+    private float clipProgress;
+    /** The recording that ended last counted too few frames: its bar stays over the review of its page. */
+    private boolean clipWeak;
+    private boolean far;
+    /** {top, right, bottom, left}: the paper of the live picture runs past that side of what the camera sees. */
+    private boolean[] past;
+    private static final float MARK = 10f;
+    /** The clip bar's height; the frame line of the small window takes the row under it. */
+    private static final float BAR = 4f;
+    private static final float EDGE = 4f, GAP = 2f;
+    // metadata-only latest-capture notice; no review/answer or power callback.
+    private String inspectionNotice = "";
+    private java.util.function.BooleanSupplier inspectionCurrent = () -> false;
+
+    void showInspectionNotice(String text, java.util.function.BooleanSupplier current) {
+        inspectionNotice = text == null || text.length() > 24 ? "" : text;
+        inspectionCurrent = current == null ? () -> false : current;
+        invalidate();
+    }
 
     void showRecording(boolean active) { recording = active; invalidate(); }
+
+    /**
+     * The clip being recorded: a bar standing on the top edge of the small window, as wide as the window, a line
+     * when the recording starts and filled from the left by the share of the frames it wants that have counted.
+     * Only frames taken with the head still count, so the bar stands still while the head moves: that is the cue,
+     * without a word. Worn on 2026-11-16 (M-33) 5 to 8 frames of 290 were still on three pages and nothing said
+     * so: the line there was until then lay over the lower edge of the image and was not drawn while nothing had
+     * counted. Above the image the bar is on black whatever the page looks like. Gone when the recording ends.
+     *
+     * <p>Unless the recording ended with fewer than two thirds of the frames it wants (40 of 60): then the bar comes
+     * back, as far as it got, for as long as that page's review is shown. The page is saved as always; the forward
+     * swipe that retakes it is the wearer's. Of 17 worn clips (2026-11-16, analysis-1116-cues) the nine that counted
+     * 45 or more all gave a usable page (41 to 61 frames added on the phone) and the eight that counted 28 or fewer
+     * did not; any limit from 29 to 45 parts them alike. The count foretells how many frames the phone adds, not that
+     * the page reads. The bar is forgotten when the review ends, when the display is cleared, when the capture stops
+     * and when a recording starts; a clip whose end is reported behind a cleared display or a stopped capture (the
+     * tap or the ending double tap cut it short) leaves none.</p>
+     */
+    void showClipProgress(int counted, int wanted, boolean recording) {
+        clipRecording = recording;
+        clipProgress = Math.max(0f, Math.min(1f, (float) counted / Math.max(1, wanted)));
+        clipWeak = !recording && capturing && !blank && counted * 3 < wanted * 2;
+        invalidate();
+    }
+
+    /**
+     * A mark at each corner of the small window while waiting: the paper fills too little of it. Off unless a share
+     * was saved with {@code --ef far_share}; its rule does not measure distance (register 2-24).
+     */
+    void showFar(boolean value) {
+        if (far == value) return;
+        far = value;
+        invalidate();
+    }
+
+    /**
+     * What the live picture is. 0: what a clip records, shown cut to its paper, as it always was. 1: the whole field
+     * (ClipCamera.Options.wholeWatch), of which a clip records the middle half: shown whole, with a frame around that
+     * half. 2: the whole field is watched and this picture is a clip's own frame: shown where the frame stands.
+     */
+    private int fieldPicture;
+
+    void showFieldPicture(boolean wholeWatch, boolean field) {
+        int now = !wholeWatch ? 0 : field ? 1 : 2;
+        if (fieldPicture == now) return;
+        fieldPicture = now;
+        if (now != 0) { liveBox = null; liveMisses = 0; past = null; }
+        invalidate();
+    }
+
+    /** The middle half, each way, of the corner's picture: what a clip records of the whole field. */
+    private RectF recordedPart(Bitmap picture) {
+        RectF whole = imageBounds(picture);
+        return new RectF(whole.left + whole.width() / 4f, whole.top + whole.height() / 4f,
+                whole.right - whole.width() / 4f, whole.bottom - whole.height() / 4f);
+    }
+
+    void capturePreview(boolean active) {
+        capturing = active;
+        if (!active) { paperProposal = null; liveBox = null; liveMisses = 0; clipRecording = false; clipWeak = false; far = false; past = null; }
+        if (!active && livePreview != null) { livePreview.recycle(); livePreview = null; }
+        invalidate();
+    }
+
+    void showLivePreview(Bitmap bitmap) {
+        showLivePreview(bitmap, null);
+    }
+
+    void showLivePreview(Bitmap bitmap, PaperGeometry.Box proposal) {
+        Bitmap previous = livePreview;
+        livePreview = bitmap;
+        paperProposal = proposal;
+        if (fieldPicture != 0) {
+            // The whole field with its frame: nothing is cut to the paper, and the picture itself shows where the
+            // paper runs on beyond what is recorded.
+            liveBox = null;
+            past = null;
+            if (previous != null && previous != bitmap && !previous.isRecycled()) previous.recycle();
+            invalidate();
+            return;
+        }
+        // Display only. The comparison corners describe the whole frame, so that launch keeps it whole.
+        int[] found = proposal != null ? null : PaperCrop.boxOf(bitmap);
+        if (found == null && liveBox != null && proposal == null && ++liveMisses < LIVE_MISSES) found = liveBox;
+        else liveMisses = 0;
+        liveBox = PaperCrop.steady(liveBox, found);
+        // Display only, as the box is. Not while a page is under review: the bars beside it are that page's.
+        if (preview == null) past = proposal != null ? null : PaperCrop.pastOf(bitmap, past);
+        if (previous != null && previous != bitmap && !previous.isRecycled()) previous.recycle();
+        invalidate();
+    }
 
     void onVisibleFrame(Runnable shown, Runnable hidden) {
         visibleFrame = shown;
@@ -71,6 +208,7 @@ final class HudView extends View {
         super(context);
         paint.setColor(GREEN);
         paint.setTypeface(Typeface.MONOSPACE);
+        statusPaint.set(paint);
         guidePaint.setColor(GREEN);
         guidePaint.setStyle(Paint.Style.STROKE);
     }
@@ -86,39 +224,91 @@ final class HudView extends View {
         invalidate();
     }
 
+    private boolean blank;
+
+    /**
+     * Off as the wearer sees it: nothing is drawn and nothing counts as shown until it is turned back on; what was on
+     * screen is kept for the return. The system's own display sleep comes through the phone and may be late or absent.
+     */
+    void setBlank(boolean value) {
+        if (blank == value) return;
+        blank = value;
+        if (value) clipWeak = false; // a page held behind the cleared display gets a review of its own on return
+        invalidate();
+    }
+
+    boolean isBlank() { return blank; }
+
     /** Text only: the states where there is nothing to look at. */
     void showLines(List<String> newLines) {
         set(newLines, null, false);
     }
 
-    /** Aiming: a direction cue, not an outline to fit the physical page into. */
+    /** The chooser's word on the answer routes; null while what is shown is not the chooser's list. */
+    private String route;
+
+    /**
+     * The chooser's list and, beside its last row, one line on whether answers can come (RouteCheck). The line takes
+     * the place the camera's corner has during a capture, so no row of the list moves or shrinks for it; a line too
+     * long for that width takes the row above as well.
+     */
+    void showChoices(List<String> choices, String word) {
+        set(choices, null, false);
+        route = word == null ? "" : word;
+    }
+
+    /** The word changed. It belongs to the chooser's list: once anything else has been shown it is dropped. */
+    void showRoute(String word) {
+        if (route == null) return;
+        route = word == null ? "" : word;
+        invalidate();
+    }
+
+    /** Aiming keeps the live image and its frame visible throughout capture. */
     void showAiming(List<String> newLines) {
         set(newLines, null, true);
     }
 
+    private Runnable fade;
+
+    /** Clear what is shown now after FADE_MILLIS, unless something else replaces it first. */
+    void fadeSoon() {
+        List<String> shown = lines;
+        boolean guide = aiming;
+        if (fade != null) removeCallbacks(fade);
+        fade = () -> {
+            if (preview == null && aiming == guide && lines.equals(shown)) {
+                lines = Collections.emptyList();
+                aiming = false;
+                invalidate();
+            }
+        };
+        postDelayed(fade, FADE_MILLIS);
+    }
+
     /**
-     * Review: the still fills the upper band and the text sits under it.
+     * Review: the still, cropped to its paper when one stands out, stays in the capture corner without instructions.
      *
-     * <p>This is the substitute for a viewfinder. A live preview would hold
-     * the camera streaming, and the privacy indicator stays lit for exactly as
-     * long as the camera streams.</p>
+     * <p>The captured image stays visible for review while the live stream
+     * observes any page turn for the next capture.</p>
      */
     void showReview(Bitmap still, List<String> newLines) {
         previewPaint.setColorFilter(reviewContrast(still));
         set(newLines, still, false);
     }
 
-    /** Change only the footer: the same image/frame and its 3s clock stay valid. */
+    /** Change only the corner status: the same image/frame and its 3s clock stay valid. */
     void showReviewNotice(String notice) {
-        if (preview == null || preview.isRecycled() || lines.isEmpty()) return;
-        List<String> updated = new ArrayList<>(lines);
-        updated.set(updated.size() - 1, notice);
-        lines = updated;
+        if (preview == null || preview.isRecycled()) return;
+        lines = List.of(notice);
         invalidate();
     }
 
     private void set(List<String> newLines, Bitmap still, boolean showGuide) {
         lines = newLines == null ? Collections.emptyList() : new ArrayList<>(newLines);
+        route = null;
+        // The review ended. Not on every view without a picture: one may come between a clip's end and its review.
+        if (still == null && preview != null) clipWeak = false;
         preview = still;
         aiming = showGuide;
         invalidate();
@@ -128,6 +318,7 @@ final class HudView extends View {
     protected void onDraw(Canvas canvas) {
         super.onDraw(canvas);
         canvas.drawColor(Color.BLACK);
+        if (blank) return;
         if (!frameReported && isShown() && hasWindowFocus() && visibleFrame != null) {
             frameReported = true;
             Runnable rendered = visibleFrame;
@@ -138,40 +329,116 @@ final class HudView extends View {
             });
         }
 
-        float textTop = 0;
         Bitmap still = preview;
         if (still != null && !still.isRecycled()) {
-            textTop = drawPreview(canvas, still);
+            drawPreview(canvas, still);
+        } else if (capturing && livePreview != null && !livePreview.isRecycled()) {
+            drawPreview(canvas, livePreview);
+            drawGuide(canvas);
         } else if (aiming) {
             drawGuide(canvas);
-            textTop = Math.max(0, getHeight() - (lines.size() + 1) * 26f);
         }
-        if (recording) {
-            paint.setTextSize(22);
-            canvas.drawText("REC", Math.max(8, getWidth() - 62), getHeight() - 8, paint);
+        if (recording && still == null) {
+            RectF area = captureArea();
+            canvas.drawCircle(area.right - 3f, area.top - 12f, 3f, paint);
+        }
+        // While it is recorded; and, for a clip that ended short, over its page's review. The picture under review is
+        // cut to the corner, which begins below the bar: nothing of it is covered.
+        if (capturing && (still == null ? clipRecording : clipWeak)) {
+            // On the corner's edge, not the picture's: the picture follows the paper, and the bar has to stand still.
+            RectF area = captureArea();
+            float bottom = area.top - 1f, top = bottom - BAR;
+            canvas.drawRect(area.left, top, area.right, top + 1f, paint); // empty: a clip that counts nothing still shows
+            canvas.drawRect(area.left, top, area.left + area.width() * clipProgress, bottom, paint);
+        }
+        if (capturing && past != null) {
+            // A bar outside each side of the corner the paper runs past: what is printed beyond it is not in the
+            // picture. Outside, because the picture inside is cut to the paper and its own outline cannot say it;
+            // the upper bar above the clip's bar. Worn on 2026-11-17 the top and one side of a large sheet were
+            // out of view on most captures and nothing on the display showed it (M-44).
+            RectF area = captureArea();
+            float left = area.left - GAP - EDGE, right = area.right + GAP + EDGE;
+            float top = area.top - BAR - 1f - GAP - EDGE, bottom = area.bottom + GAP + EDGE;
+            if (past[0]) canvas.drawRect(area.left, top, area.right, top + EDGE, paint);
+            if (past[1]) canvas.drawRect(right - EDGE, area.top, right, area.bottom, paint);
+            if (past[2]) canvas.drawRect(area.left, bottom - EDGE, area.right, bottom, paint);
+            if (past[3]) canvas.drawRect(left, area.top, left + EDGE, area.bottom, paint);
+        }
+        if (capturing && far && still == null) {
+            RectF area = captureArea();
+            for (float x : new float[]{area.left, area.right - MARK}) for (float y : new float[]{area.top, area.bottom - MARK}) {
+                canvas.drawRect(x, y, x + MARK, y + MARK, paint);
+            }
+        }
+        if (still == null && capturing && !inspectionNotice.isEmpty()) {
+            boolean current;
+            try { current = inspectionCurrent.getAsBoolean(); }
+            catch (RuntimeException unavailable) { current = false; }
+            if (current) {
+                RectF area = captureArea();
+                paint.setTextSize(16f);
+                float width = paint.measureText(inspectionNotice);
+                if (width > area.width()) paint.setTextSize(16f * area.width() / width);
+                canvas.drawText(inspectionNotice, area.left, area.top - 25f, paint);
+            } else inspectionNotice = "";
         }
         if (lines.isEmpty()) {
             return;
         }
 
-        float available = getHeight() - textTop;
         boolean compact = aiming || still != null;
-        float lineHeight = compact ? 26f : available / (float) (lines.size() + 1);
-        float textSize = compact ? 22f : lineHeight * 0.55f;
-        paint.setTextSize(textSize);
-        float widest = 0;
+        if (compact) {
+            drawCaptureStatus(canvas);
+            return;
+        }
+        drawStatus(canvas);
+    }
+
+    private void drawStatus(Canvas canvas) {
+        StringBuilder text = new StringBuilder();
         for (String line : lines) {
-            widest = Math.max(widest, paint.measureText(line == null ? "" : line));
+            if (text.length() > 0) text.append('\n');
+            if (line != null) text.append(line);
         }
-        float textWidth = Math.max(1, getWidth() - lineHeight * 0.4f);
-        if (widest > textWidth) {
-            paint.setTextSize(textSize * textWidth / widest);
+        while (text.length() > 0 && text.charAt(text.length() - 1) == '\n') text.setLength(text.length() - 1);
+        if (text.length() == 0 || getWidth() <= 0 || getHeight() <= 0) return;
+
+        // Leave the centre clear and the existing lower-right camera image unobstructed.
+        float bottom = Math.max(1f, getHeight() - CAPTURE_MARGIN);
+        float height = Math.max(1f, Math.min(getHeight(), panelHeight() * .30f) - CAPTURE_MARGIN);
+        int width = Math.max(1, (int) (getWidth() * .60f - CAPTURE_MARGIN));
+        statusPaint.setTextSize(18f);
+        StaticLayout layout = statusLayout(text, width);
+        while (layout.getHeight() > height && statusPaint.getTextSize() > 1f) {
+            statusPaint.setTextSize(Math.max(1f, statusPaint.getTextSize() * height / layout.getHeight() - .5f));
+            layout = statusLayout(text, width);
         }
-        float y = textTop + lineHeight;
-        for (String line : lines) {
-            canvas.drawText(line == null ? "" : line, lineHeight * 0.2f, y, paint);
-            y += lineHeight;
-        }
+        canvas.save();
+        canvas.clipRect(CAPTURE_MARGIN, bottom - height, CAPTURE_MARGIN + width, bottom);
+        canvas.translate(CAPTURE_MARGIN, bottom - layout.getHeight());
+        layout.draw(canvas);
+        canvas.restore();
+        if (route == null || route.isEmpty()) return;
+        // Right of the list, standing on the same bottom row, as large as the list's own text. On these screens the
+        // camera's corner is empty, and there is no row under the list: it ends 8 px above the rows kept dark.
+        float left = CAPTURE_MARGIN + width + CAPTURE_MARGIN;
+        float right = getWidth() - CAPTURE_MARGIN;
+        if (right - left < 1f) return;
+        StaticLayout word = statusLayout(route, (int) (right - left));
+        canvas.save();
+        canvas.clipRect(left, bottom - height, right, bottom);
+        canvas.translate(left, bottom - word.getHeight());
+        word.draw(canvas);
+        canvas.restore();
+    }
+
+    private StaticLayout statusLayout(CharSequence text, int width) {
+        return StaticLayout.Builder.obtain(text, 0, text.length(), statusPaint, width)
+                .setAlignment(Layout.Alignment.ALIGN_NORMAL)
+                .setIncludePad(true)
+                .setBreakStrategy(Layout.BREAK_STRATEGY_SIMPLE)
+                .setHyphenationFrequency(Layout.HYPHENATION_FREQUENCY_NONE)
+                .build();
     }
 
     /** The display bounds are not a calibrated camera field of view. */
@@ -180,32 +447,96 @@ final class HudView extends View {
         if (guide.width() <= 0) {
             return;
         }
-        float radius = Math.max(4f, Math.min(guide.width(), guide.height()) * 0.03f);
-        float x = getWidth() / 2f;
-        float y = getHeight() / 2f;
         guidePaint.setStrokeWidth(2f);
-        canvas.drawLine(x - radius, y, x + radius, y, guidePaint);
-        canvas.drawLine(x, y - radius, x, y + radius, guidePaint);
-        paint.setTextSize(22);
-        canvas.drawText(spreadGuide ? "B5 見開き" : "B5 1ページ", 8, 26, paint);
-        canvas.drawText("紙面へ顔を向ける", 8, 54, paint);
+        Bitmap frame = livePreview;
+        if (frame == null || frame.isRecycled()) return;
+        if (fieldPicture != 0) {
+            // The frame: what lies inside it is what a clip records. Dark on both sides of the bright line, because
+            // a sheet larger than the frame fills the field with paper and a bright line on paper cannot be seen.
+            RectF part = recordedPart(frame);
+            guidePaint.setColor(Color.BLACK);
+            guidePaint.setStrokeWidth(8f);
+            canvas.drawRect(part, guidePaint);
+            guidePaint.setColor(GREEN);
+            guidePaint.setStrokeWidth(2f);
+            canvas.drawRect(part, guidePaint);
+            return;
+        }
+        int[] crop = PaperCrop.pixels(frame, liveBox);
+        if (crop != null) {
+            // The line is the limit of what the camera sees: paper that reaches it is cut off in the photo.
+            RectF shown = fit(crop[2] - crop[0], crop[3] - crop[1]);
+            float scale = shown.width() / (crop[2] - crop[0]);
+            canvas.save(); canvas.clipRect(shown.left - 1f, shown.top - 1f, shown.right + 1f, shown.bottom + 1f);
+            canvas.drawRect(shown.left - crop[0] * scale + 1f, shown.top - crop[1] * scale + 1f,
+                    shown.left + (frame.getWidth() - crop[0]) * scale - 1f,
+                    shown.top + (frame.getHeight() - crop[1]) * scale - 1f, guidePaint);
+            canvas.restore();
+            return;
+        }
+        RectF bounds = imageBounds(frame);
+        PaperGeometry.Box proposal = paperProposal;
+        if (proposal == null) { canvas.drawRect(bounds, guidePaint); return; }
+        float left = bounds.left + bounds.width() * proposal.left / proposal.width;
+        float top = bounds.top + bounds.height() * proposal.top / proposal.height;
+        float right = bounds.left + bounds.width() * proposal.right / proposal.width;
+        float bottom = bounds.top + bounds.height() * proposal.bottom / proposal.height;
+        float length = Math.min(10f, Math.min(right - left, bottom - top) / 5f);
+        canvas.save(); canvas.clipRect(bounds);
+        for (int corner = 0; corner < 4; corner++) {
+            boolean isLeft = corner % 2 == 0, isTop = corner < 2;
+            float x = isLeft ? left : right, y = isTop ? top : bottom;
+            canvas.drawLine(x, y, x + (isLeft ? length : -length), y, guidePaint);
+            canvas.drawLine(x, y, x, y + (isTop ? length : -length), guidePaint);
+        }
+        canvas.restore();
     }
 
-    /** Show the complete capture once, with no inset or label covering the paper. */
-    private float drawPreview(Canvas canvas, Bitmap still) {
-        float band = Math.max(1, getHeight() - (lines.size() + 1) * 26f);
-        float scale = Math.min(
-                getWidth() / (float) still.getWidth(), band / still.getHeight());
-        float width = still.getWidth() * scale;
-        float height = still.getHeight() * scale;
-        RectF target = new RectF(
-                (getWidth() - width) / 2f, (band - height) / 2f,
-                (getWidth() + width) / 2f, (band + height) / 2f);
+    /** Show the given image, the live one cut to its paper, in one corner; status never covers it. */
+    private void drawPreview(Canvas canvas, Bitmap still) {
+        int[] crop = still == livePreview ? PaperCrop.pixels(still, liveBox) : null;
+        RectF target = crop == null ? imageBounds(still) : fit(crop[2] - crop[0], crop[3] - crop[1]);
+        if (still == livePreview && fieldPicture == 2) target = recordedPart(still);
         canvas.save();
-        canvas.clipRect(0, 0, getWidth(), band);
-        canvas.drawBitmap(still, null, target, previewPaint);
+        canvas.clipRect(captureArea());
+        canvas.drawBitmap(still, crop == null ? null : new android.graphics.Rect(crop[0], crop[1], crop[2], crop[3]),
+                target, still == livePreview ? livePaint : previewPaint);
         canvas.restore();
-        return band;
+    }
+
+    /** Margins around this view place it for the wearer; sizes keep following the whole panel. */
+    private int panelHeight() {
+        return Math.max(getHeight(), getRootView().getHeight());
+    }
+
+    private RectF captureArea() {
+        float right = Math.max(1, getWidth() - CAPTURE_MARGIN);
+        float bottom = Math.max(1, getHeight() - CAPTURE_MARGIN);
+        return new RectF(Math.max(0, right - getWidth() * CAPTURE_FRACTION),
+                Math.max(0, bottom - panelHeight() * CAPTURE_FRACTION), right, bottom);
+    }
+
+    private RectF imageBounds(Bitmap image) {
+        return fit(image.getWidth(), image.getHeight());
+    }
+
+    /** The largest rectangle of this shape centred in the capture corner. */
+    private RectF fit(float imageWidth, float imageHeight) {
+        RectF area = captureArea();
+        float scale = Math.min(area.width() / imageWidth, area.height() / imageHeight);
+        float width = imageWidth * scale, height = imageHeight * scale;
+        return new RectF(area.centerX() - width / 2f, area.centerY() - height / 2f,
+                area.centerX() + width / 2f, area.centerY() + height / 2f);
+    }
+
+    private void drawCaptureStatus(Canvas canvas) {
+        RectF area = captureArea();
+        String text = lines.get(0) == null ? "" : lines.get(0);
+        paint.setTextSize(18f);
+        float available = Math.max(1, area.width() - 14f);
+        float width = paint.measureText(text);
+        if (width > available) paint.setTextSize(18f * available / width);
+        canvas.drawText(text, area.left, area.top - 7f, paint);
     }
 
     /** Display-only green contrast stretch; JPEG, OCR and uploaded pixels stay untouched. */

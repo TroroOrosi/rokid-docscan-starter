@@ -46,3 +46,5 @@ include(":glassdoc")
 // works from recognized-text bounding boxes and knows which side is cut.
 include(":pagequality")
 
+include(":phonehost")
+

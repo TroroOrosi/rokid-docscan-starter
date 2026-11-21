@@ -1,4 +1,10 @@
+import html
 import io
+import json
+import shutil
+import subprocess
+import tempfile
+from pathlib import Path
 
 import pytest
 from PIL import Image, ImageDraw
@@ -35,3 +41,37 @@ def make_image_fixture():
 @pytest.fixture
 def image_bytes_fixture():
     return image_bytes
+
+
+@pytest.fixture
+def dom_states():
+    """Run a script in local headless Chromium; return what it stored in ``<pre id=states>``.
+
+    A browser start that hangs is retried once with a fresh profile: on CI the same
+    commit both passed and timed out at 30 s (2026-11-10, Linux and Windows runners).
+    """
+    browser = next((p for p in [shutil.which("google-chrome"), shutil.which("chromium"),
+                    "C:/Program Files/Google/Chrome/Application/chrome.exe"] if p and Path(p).is_file()), None)
+    if browser is None:
+        pytest.skip("local Chromium is not installed; no browser is downloaded")
+
+    def run(script: str):
+        for attempt in range(2):
+            with tempfile.TemporaryDirectory(prefix="rokid-dom-", ignore_cleanup_errors=True) as directory:
+                fixture = Path(directory) / "fixture.html"
+                fixture.write_text('<meta charset="utf-8"><body><script>' + script + "</script>", encoding="utf-8")
+                try:
+                    result = subprocess.run([
+                        browser, "--headless", "--dump-dom", "--disable-background-networking",
+                        "--disable-component-update", "--disable-sync", "--no-first-run",
+                        "--no-default-browser-check", "--host-resolver-rules=MAP * ~NOTFOUND",
+                        "--user-data-dir=" + str(Path(directory) / "profile"), fixture.as_uri(),
+                    ], capture_output=True, text=True, encoding="utf-8", timeout=30, check=False)
+                except subprocess.TimeoutExpired:
+                    if attempt:
+                        raise
+                    continue
+            assert result.returncode == 0, f"{browser} exited {result.returncode}: {result.stderr}"
+            return json.loads(html.unescape(result.stdout.split('<pre id="states">', 1)[1].split("</pre>", 1)[0]))
+
+    return run

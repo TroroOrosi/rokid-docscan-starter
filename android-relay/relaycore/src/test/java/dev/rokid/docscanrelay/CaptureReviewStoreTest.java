@@ -8,6 +8,13 @@ import static org.junit.Assert.assertTrue;
 import org.junit.Test;
 
 public class CaptureReviewStoreTest {
+    @Test public void bothLegacySceneAndCurrentMetadataIssuesRequireRecapture() {
+        CaptureReviewStore store = new CaptureReviewStore();
+        assertTrue(store.stage(0, new byte[]{1}, "", 0, "SCENE_TIMESTAMP_UNRESOLVED").needsSceneRecapture());
+        assertTrue(store.stage(0, new byte[]{1}, "", 0, "CAPTURE_METADATA_UNRESOLVED").needsSceneRecapture());
+        assertFalse(store.stage(0, new byte[]{1}, "", 0, "").needsSceneRecapture());
+    }
+
     @Test
     public void stagedPhotoKeepsTheOriginalPageAndBytesUntilConfirmed() {
         CaptureReviewStore store = new CaptureReviewStore();

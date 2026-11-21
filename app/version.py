@@ -173,7 +173,277 @@ from __future__ import annotations
 # Predevice hardening: exact input identity and durable browser send guard.
 # Snapshot reads and recording-retry integrity; no HTTP envelope change.
 # Capture evidence diagnostics and honest text-bounds/review labels; HTTP unchanged.
-APP_VERSION = "0.35.3"
+# Bounded Camera2 metering before glassdoc JPEG capture; physical quality unverified.
+# Original-image/audio browser input; no local transcription gate or repeated bundle encoding.
+# finalize-reading can return after segmentation and solve in the background.
+# A background batch asks the model for the 小問 before solving (RP-12).
+# Concurrent sessions keep their own chats; the phone start script and deck bench
+# stop early with the reason. See API 1.26.0 and GLASSES_VIEW_CONTRACT 1.19.0.
+# A background session sends one message for the whole booklet; see API 1.27.0.
+# Audit fixes: completion by content, JPEG attachments one per DevTools message,
+# pre-send retries and read-back after an uncertain send, restart resume, no
+# PDF path. See API 1.28.0 and GLASSES_VIEW_CONTRACT 1.20.0.
+# A booklet already in its chat is read back, never sent again; resume is
+# limited to recent sessions and to RESUME_LIMIT failed batches. See API 1.29.0.
+# A spread photo reaches ChatGPT as its right page, then its left, one page per
+# image; a kanji-numbered 大問 stays a group. See API 1.29.1.
+# 0.44.0: the one reply carries each question's printed 解答番号, a number it
+# skipped becomes a failed row instead of vanishing, and automatic capture
+# rests the camera after 30s without a registered page. See API 1.30.0 and
+# GLASSES_VIEW_CONTRACT 1.21.0.
+# 0.45.0: manual capture mode (one tap, one photo) for pages the recogniser
+# cannot judge, and the bench grades a 問 that fills several 解答番号 per
+# number. See GLASSES_VIEW_CONTRACT 1.22.0; API unchanged.
+# 0.46.0: venue networking. The server host "gateway" resolves to the Wi-Fi
+# gateway (the phone hotspot), the server remembers the glasses' address
+# for the fold watcher, and a large sheet may arrive in sections.
+# 0.46.1: the glasses capture as measured before 9/23, and the fold watcher
+# finds the glasses among the phone hotspot clients. See GLASSES_VIEW 1.23.0.
+# 0.46.2: capture text and the aim mark clear after 1.5s; "answers" opens a
+# server session's answers on the glasses without a capture.
+# 0.47.0: the glasses meter with the preview running under the still (3s cap),
+# wait for the head to be still, show no text while aiming, and show the
+# review photo cropped to the paper. See GLASSES_VIEW_CONTRACT 1.25.0.
+# 0.47.1: untouched still (vc29): the measured session returned no JPEG after
+# metering. That observation is not a HAL guarantee. The 0.47.0 view changes stay.
+# 0.48.0: phone-owned Chromium and services; ordered image batches in one chat,
+#        image-based page changes, continuous answers and explicit display requests.
+# 0.49.0: unobstructed still review, aligned preview geometry, compact fixed
+#        answer pages and display control preserving the system timeout.
+# 0.49.1: measured ChatGPT composer and checked Latest/Extra High selection.
+# 0.50.0: mixed English solves paper before original audio; idle displays rest
+#         after five seconds while capture, photo review and answers stay visible.
+# 0.50.1: read the checked model from the visible menu after its trigger redraws.
+# 0.50.2: keep the browser's saved model selection across display-name changes.
+# 0.50.3: select the original Latest menu position even after its label changes.
+# 0.51.0: source-bound phone image inspection, compact capture HUD and opt-in
+#         durable Work jobs. Cloud connection and physical acceptance remain separate.
+# 0.51.1: retain native chroma in outgoing JPEGs and native capture provenance
+#         through local review and durable page storage.
+# 0.51.2: keep non-answer status and chooser text in a compact display region.
+# 0.51.3: return non-answering Work needs_input results when image quality fails.
+# 0.52.0: phone-local Work browser delivery of original PNG ZIPs with durable
+#         batches, source-bound uncalibrated readability and staged original audio.
+# 0.53.0: visible phone services and retained capture preview; expired Work
+#         receipts can release their own barrier without replaying a send.
+# 0.53.1: compare native phone paths as POSIX strings during Windows update preparation.
+# 0.53.2: preflight atomic no-clobber phone publication and preserve failure diagnostics.
+# 0.54.0: retain two native future-page candidates through visible review and
+#         persist unresolved observation before starting the native producer.
+# 0.55.0: bind native JPEG provenance to page receipts and unchanged Work sources.
+# 0.56.0: keep active page observation, adapt semantic Work controls and pin service Bash.
+# 0.57.0: evaluate timestamp-paired full-resolution ZSL with durable source-kind provenance.
+# 0.57.1: preserve strict Work MCP inputs on the phone's legacy Pydantic stack.
+# 0.58.0: compare exact original-video frames without changing ordinary capture.
+# 0.58.1: reject malformed Work URLs consistently across supported Python versions.
+# 0.59.0: evaluate an original-video and maximum-JPEG hybrid with a recorder stop barrier.
+# 0.60.0: retain authenticated original-video comparison uploads with durable receipts.
+# 0.61.0: transfer explicit comparison videos with persistent origin and receipt checks.
+# 0.61.1: preserve complete current Android runtime values across supervised phone services.
+# 0.62.0: connect bounded Work capture diagnostics and exact decoded-video candidates.
+# 0.62.1: retain the unchanged original PNG in bounded capture diagnostic packets.
+# 0.63.0: handle owned Work-menu unmounts and seal new jobs to a public family model.
+# 0.64.0: close owned Work menus with real Escape and live selection evidence.
+# 0.65.0: discover serial-verified glasses after hotspot address changes and cold starts.
+# 0.65.1: bounded phone-local unicast DNS-SD when the ADB mDNS service is unavailable.
+# 0.65.2: respect protected glasses windows when a delayed phone sleep arrives.
+# 0.66.0: evaluate pre-upload selection between two retained native originals;
+#         prioritize a verified running app's explicit sleep over diagnostics.
+# 0.66.1: bounded monotonic timing metadata for phone-side display delivery diagnosis.
+# 0.66.2: include watcher work in its polling interval instead of adding fixed delay.
+# 0.66.3: retain unlabelled questions and nonconsecutive printed answer numbers.
+# 0.66.4: share capture context with Work and supplement coarse page-change evidence.
+# 0.67.0: extended graph/construction slides, lossless plain answers and scene-bound metering.
+# 0.68.0: preserve measured capture timing/exposure and large original/answer payloads.
+# 0.68.1: accept hidden Work close animations while retaining selection-change guards.
+# 0.69.0: preserve native JPEG originals and bind opt-in Work delivery to upright pixels.
+# 0.69.1: recognize numbered Work attachment display names without relaxing upload identity.
+# 0.69.2: repair Work receipt types and recover sealed replies with singleton metadata.
+# 0.69.3: use Standard Work speed and prevent silent answer-body or fraction-scope loss.
+# 0.69.4: retain unsupported table and matrix expressions before display conversion.
+# 0.69.5: default production Work answers to Fast while trials explicitly use Standard.
+# 0.70.0: a Work usage limit or unusable Work control hands the same booklet to Chat.
+# 0.70.1: Chat leaves Work by its Chat button and selects the Extra High power position, as read on the phone.
+# 0.71.0: the Chat booklet checks its file count against the 3-hour upload window before attaching.
+# 0.72.0: Chat images are cropped to the paper when its box is certain; otherwise the frame is sent as before.
+# 0.73.0: ROKID_SOLVER=codex-cli answers a whole booklet with one `codex exec` request (the official CLI and the
+#         operator's ChatGPT sign-in, no web page), with Chat behind it; the Chat route was repaired on the live page.
+# 0.74.0: a check before use tries every booklet route (the Codex CLI with one small real request) and keeps the
+#         result, daily too; a photo is made into its PNG off the event loop and outside the write lock; the watcher's
+#         poll no longer hashes every page file.
+# 0.75.0: the Codex route asks which way each page's lines run and sends the page at twice its size in strips or
+#         bands along them (six reads each on the phone: 1.59% of the characters wrong against 4.10% as one image); a
+#         booklet too large for the model's context is enlarged less; a photo's files are written before the write lock.
+# 0.76.0: the Codex route reads a booklet twice at the same time and marks a short answer the two reads disagree
+#         on, with the other answer, as one to review (ROKID_CODEX_READS, default 2).
+# 0.77.0: a recorded page: its clip is kept beside it and gathered on the phone into the page's image; the booklet
+#         waits for its clips (bounded) and the answers name each recorded page that stayed one frame. See API 1.47.0.
+# 0.78.0: a clip from a worn head is gathered: the picture is followed from frame to frame, and a frame that lies
+#         away from the first is laid on the page by a map of its own (a homography) instead of one shift. A clip
+#         from glasses that lie still gathers to the same page as before, bit for bit.
+# 0.78.1: a Codex CLI that is signed out hands the booklet to the next route (Chat) after one retry, as a usage
+#         limit does. Its sign-in is its own; it was retried where it stood, as a signed-out browser is.
+# 0.79.0: the Codex CLI answers in its Fast tier (service_tier=priority) unless ROKID_CODEX_SPEED=standard, as Work
+#         does unless ROKID_WORK_SPEED=standard (the operator, 2026-11-16: Fast for the CLI and for Work).
+# 0.80.0: the booklet's routes in the operator's order (2026-11-16): the Codex CLI, then Work when the CLI cannot
+#         be used for another cause, then Chat when the usage has run out (a limit on the CLI or on Work closes
+#         both, since they draw on one allowance). Work runs behind another primary with its sealed job, input
+#         fence and commit guard, and is passed over for a session without a registered wearer.
+# 0.80.1: Chat's reply wait takes only a stop control that is on screen for a reply being written. The first
+#         booklet Chat took over at a real usage limit (phone, 2026-11-16) was answered on the page and never
+#         collected: a second composer of zero size kept a Stop button, and the wait runs 150 minutes.
+# 0.80.2: the address the page shows right after a send (/c/local-chatgpt%3A<id>) is not recorded as the chat's.
+#         After the restart that brought 0.80.1 the answered booklet of 2026-11-16 could not be read back:
+#         loading that address leads to the home page.
+# 0.80.3: a Codex CLI run that hangs gives the booklet to the next route in minutes, by the booklet's size
+#         (it was held 3600 s, longer than a 50-minute test).
+# 0.81.0: what an answer holds. The answer sheet is not among the images, so the form is judged from the question:
+#         a mark, choice, boxed number or word alone where that is what is filled in, otherwise the result and then
+#         the working needed for full credit. A drawing is redrawn with the printed figure's reference points and
+#         said in words; one that cannot be represented keeps its written part instead of becoming needs_input.
+#         A ready item whose figure cannot be drawn, or that carries a field outside the format, keeps its text
+#         and is shown for review (it was stored as failed and empty). See API 1.48.0.
+# 0.82.0: paper other than a spread, and a send left uncertain. The booklet request asks what the captures leave
+#         out (a gap in the printed page numbers, text cut at an image's edge with no adjoining capture) and says
+#         which captures are greyscale (recorded pages). On the Codex route every sheet or part of a sheet with
+#         exam matter is located (answer sheets, resource sheets, cards, strips), a photo with a discarded box
+#         also goes whole, and a region cut from a still is sent at twice its own pixels in files under the
+#         CLI's cap. Work keeps the answers that do not rest on a capture its review could not read. A Chat send
+#         whose reply was never collected is read back by itself: found among the newest conversations by its
+#         batch id when no address was recorded, and resolved before another session's booklet is refused
+#         (register 3-17). See API 1.49.0.
+# 0.82.1: an item that names what the captures leave out is shown behind the answers. The model lists it where
+#         the gap lies; inside a 大問 that split the group in two on the glasses (phone, 2026-11-16).
+# 0.83.0: the Codex CLI and Work answer at High unless ROKID_CODEX_EFFORT / ROKID_WORK_EFFORT say otherwise (they
+#         were at Extra High). On this system's own pages High read as Extra High did and gave the same results on
+#         hard written mathematics, in less time (M-36, M-37, M-39). Chat stays GPT-6 at Extra High. A Work job
+#         already sealed keeps its setting.
+# 0.84.0: what the glasses cannot draw is written out. Their answer typeface has the script digits and the
+#         superscript n, and no script sign or other script letter (read from the fonts' own tables, register
+#         3-22): a signed power is ^(...), and a run of script characters a model wrote itself that holds an
+#         undrawn one is ^(...) or _(...). A failed browser route leaves the structure of its page (counts of
+#         controls, no text); the check before use can send one small real message through Chat as a
+#         booklet's goes; a Codex model the service no longer offers is named model_mismatch. See API 1.50.0.
+#         The Chat route waits for its model control as it waits for the composer: on a slowly loading page
+#         the control came later and a booklet handed over from the CLI stopped there (phone, 2026-11-16).
+# 0.84.1: two reads of a mark sheet whose answer boxes are lettered are compared box by box (forty pages on the
+#         phone had every item of both reads shown and marked). A set of files that was uploaded twice without
+#         a message being sent is not uploaded a third time: one booklet that could not be sent had used 70 of
+#         the 80 files of the upload window in five retries (phone, 2026-11-16).
+# 0.85.0: what the operator's trial of 2026-11-17 showed about the answers (three papers on large sheets, M-44).
+#         A written answer carries its working whether or not an instruction to show it was captured, and although
+#         a box or a blank is printed for the result; a bare answer is for a mark sheet, a choice, or a word,
+#         reading or phrase to fill in. The working starts on a line that begins with 式：, and two reads are
+#         compared by what stands before it (until now nothing over 24 characters was compared, so a result with
+#         working went unchecked). The answer boxes of one question are given under their printed names inside
+#         that question's one item (they came back as unnamed items of their own). Soft print is read with its
+#         context before a question is given up; a number, a symbol or a choice label is still never guessed.
+#         Where captures overlap, each place is read from the capture that shows it best. See API 1.51.0.
+# 0.85.1: what the records of that same trial held and nobody had reported (M-44 (15)). A clip whose first
+#         still frames show another view (the paper was moved during the recording) is gathered where most of
+#         its still frames are: it used to be "not placed" and its page went out as one dark frame. A printed
+#         sub-question number such as (1) is no longer taken for the mark of a repeated number and cut from the
+#         label the glasses show (5 to 21 items a booklet of mathematics read "1 " or "全問"). A reply of the
+#         Codex CLI that cannot be used, and a run the phone could not carry out, hand the booklet to the next
+#         route as a time-out does; they used to end it. See API 1.51.1.
+# 0.86.0: the faults found by reading the structure end to end on 2026-11-17 (M-44 (15), (16)), each with a test
+#         seen to fail first; none of it seen on the live routes. The Codex route: a locating request that does
+#         not come back gives the booklet to the next route at once; a read that hangs behind a finished one is
+#         ended after that read's time again (two minutes at least); a usage limit is taken from the CLI's own
+#         sentence or an error line, not from any word of the run; reads that name unnumbered questions
+#         differently are compared in order; a booklet one read of two answered says so behind its answers. The
+#         routes: Work behind the CLI that cannot take a booklet, and holds nothing of it, hands it to Chat; an
+#         uncertain Work send is read back a few times and then ends with its sentence; a batch that dies outside
+#         every handler ends the booklet with a sentence the third time; a start resumes the session the glasses
+#         are on and the sends on record, not every booklet of the last three hours; the daily deep check is no
+#         longer put off by shallow ones. The gathering: the booklet in hand first, a clip the server stopped on
+#         twice given up, clips removed after three days (gathered) or a week (failed). See API 1.52.0.
+# 0.86.1: a clip whose frames cannot all be decoded is refused with that reason, at once. One desk clip of forty
+#         had lost two frames behind its key frame on the glasses (2026-11-18); the decoder's complaints filled a
+#         pipe nobody read and the clip "timed out" after 30 s, and with a larger pipe the frames that did
+#         decode would have been gathered out of step with the glasses' record of each frame.
+# 0.87.0: from the operator's three subjects of 2026-11-18, read from the phone's records. The Codex CLI may take
+#         five minutes and fifty seconds a page, fifteen minutes at least (twelve gathered pages of vertical
+#         Japanese took a read over ten minutes; the booklet was given up at 600 s and the routes behind failed),
+#         and a read behind a finished one waits four minutes at most. A choice is named by its printed label,
+#         never by counting (labels ran ⑩, ⑫, ⑬ and the answers said ⑪), with the words of a short option after
+#         it; a quotation keeps its printed language; an answer sheet in view is not listed as missing. The boxes
+#         of one question are compared line by line however many they are (seven went uncompared), a choice by
+#         its label whatever words follow it, a note names the boxes that differ, and a circled label of two
+#         digits always asks to be checked on the paper (the first booklet read again: the two reads agreed on
+#         every option's words and differed on every label of two digits). The gathering
+#         is waited for 200 s (a twelfth clip was done 165 s after the end). Work's inventory leaves a conversation
+#         for the new-chat page first (it stopped twice on the daily check's chat). Chat's attach budget grows with
+#         the files' size (29 MB were not confirmed in 200 s, twice) and an unconfirmed upload logs how far it got.
+#         Unit tests only: none of it seen with the model or on the live pages.
+# 0.88.0: the same day, after the operator's word that the second booklet was given up for time. The answers go
+#         out when the first of the two reads is back (one notice item, 照合中, says the comparison is still
+#         running); the compared answers follow over the same questions. The Codex CLI and Work ask for GPT-6.2
+#         Sol (released 2026-11-17; the operator's decision, no comparison). Chat counts an uploaded file that the
+#         product renamed with the time of its upload (twelve pages stood uploaded and ten were counted: the
+#         cause of that morning's Chat failure, reproduced and then passed on the live page). See API 1.53.0.
+#         Added the same night: the Codex route's limit is a backstop of 45 minutes; parts of a question the two
+#         reads name differently are paired, not shown twice; Chat ends a message the product says it never
+#         delivered as a known failure; Work's inventory presses Work again on a page still settling; the gathering
+#         gives the same pages in about two thirds of the time (kept arrays; 38.3 s to 25.3 s a clip on the phone);
+#         a read can be made in parts at the same time (ROKID_CODEX_PARTS, 1 by default; 3 on the phone).
+# 0.89.0: the operator, 2026-11-18 night: tools and models are to be kept at the latest, and what is done about
+#         the limits on images and on use. The read in parts of 0.88.0 sent every image with every part of both
+#         reads (six times one whole read's bytes for twelve pages in three parts) and had been tried on Wi-Fi
+#         only, where the venue has the mobile network: the first read is now made in parts by the booklet's
+#         major problems (a small request beside the one that locates the pages says where they begin), each part
+#         with its own captures, and the second read is whole. A request the service refuses for its rate is sent
+#         again and is no usage limit (it had closed the CLI and Work for the booklet). The proxy logs what a
+#         request uploaded and how fast, and each request the tokens the CLI says it used. The Codex route follows the newest Sol the CLI's own model list offers,
+#         and the model this was built on when that one is refused. With ROKID_CODEX_AUTO_UPDATE=1 the server
+#         installs a newer stable CLI beside the one in use at night, tries it with a real request and only then
+#         runs it (app/codex_update.py). The check before use reports the usage window nearer its limit. See API
+#         1.54.0.
+# 0.90.0: the operator, the same night: a common test of many pages must not be left to a limit on images and to
+#         the reduction that answers it, with the risk to what is read unknown. A booklet too long for one
+#         request (nineteen frame-filling gathered pages are what one holds) had every page reduced for both
+#         reads, silently. Its first read is now made in parts by the major problems with every page at its own
+#         size, in as many parts as that takes; the second read is the whole booklet at the size that fits; what
+#         is for the whole exam goes with every part; where the major problems are not told the answers say that
+#         pages were reduced. Photos are cut one at a time (forty were held in memory twice over). Measured: a
+#         page with a known text read the same down to 0.35 of its own size (characters of 9 px) and worse at
+#         0.25. See API 1.55.0.
+# 0.91.0: the operator, 2026-11-19: is the reduction an answer to a limit on files, is there no more rational way;
+#         remove wasted data and delay from the whole structure and prevent problems before a real capture.
+#         (1) It was never a limit on files but the model's context in pixels, and the pixels were the waste: a
+#         recorded page went out on the grid it is gathered on, four times the pixels the camera took. Read
+#         against a known text (six reads a size, the rule fixed first), worn pages read better smaller; every
+#         region of a recorded page now goes at 0.63 of that grid (ROKID_CODEX_CLIP_SCALE). A booklet's requests
+#         are about four tenths of the bytes and six tenths of the tokens, and forty-five frame-filling pages fit
+#         one request where nineteen did. (2) Once the wearer has ended the capture, the pages whose images are
+#         final are located and cut while the last clips are still being gathered, and the outline is asked for
+#         as soon as nothing is left to wait for (CodexCliSolver.prepare, ROKID_CODEX_AHEAD); answering makes the
+#         same request as before. On the phone the wait between "answer this booklet" and the first request for
+#         answers went from 29-36 s to 9.8 s (one booklet). (3) A gathered page is saved grey, as it is. No HTTP
+#         schema or behaviour changes: API stays 1.55.0.
+# 0.92.0: the operator, after two subjects on 2026-11-19: the answers and the retake were not rational, and a page
+#         to take again has to be found before GPT asks for it. (1) POST /v1/documents/{id}/capture-check: when
+#         the wearer has ended the capture the phone names the recorded pages that are not whole (a clip that
+#         failed or never came, or one gathered from fewer than 40 frames: 12 of the 14 such pages on record were not
+#         read), and the glasses take them again in place before anything is finalized or sent. No measure taken
+#         from a page's picture told the read pages from the others, so nothing else is asked here. (2) The answer
+#         bundle carries nothing but the paper's questions: the items 照合中, 照合なし, 縮小 and "N頁" are gone;
+#         `comparing`, `retake` (the captures to take again) and an item's `other` (the other read's answer) say
+#         what they said. (3) Two reads that differ only in form agree: each box under its printed name against
+#         the bare values, a value in brackets, the boxes' letters against answer numbers; a two-digit label both
+#         reads agree on carries no note. (4) POST /v1/exam-sessions/{id}/retake: pages taken again after the
+#         answers were read take their pages' places, the booklet is read again whole, the answers go over the
+#         questions that were shown, and an answer the wearer already had is marked `seen`.
+# 0.93.0: the operator's use of 2026-11-20 (two subjects). A booklet without printed answer numbers came out with
+#         fifteen questions twice, thirty answers marked and moved behind the others and three good captures listed
+#         to be taken again: one read had written the groups of its first seven major problems as "1" and the
+#         other as "1." (the fourth such form; register 3-50 had been left open). (1) Two reads are lined up by a
+#         group's number when it has one and by a label without the marks at its ends; and questions still named
+#         differently are one question where both reads gave the same short answer from the same captures. The day's
+#         kept reads again: 34 questions once each and 2 answers the reads do not settle, where it was 49 and 31.
+#         (2) The answer bundle marks an answer the two reads do not settle (`uncertain`); the glasses show no such
+#         answer and its capture stays among those to take again.
+APP_VERSION = "0.93.0"
 
 # HTTP API envelope. Path prefix stays "/v1" until a breaking envelope change.
 # 1.2.0: /match responses gained the additive `ocr_similarity` field.
@@ -244,7 +514,109 @@ APP_VERSION = "0.35.3"
 #        updated; relaycore 0.3.17 does.
 # Adds operation_routes and explicit client-OCR/image-only real-mode behavior.
 # Content digest v2; persisted solve failures change the existing bundle revision.
-API_VERSION = "1.22.0"
+# Browser listening accepts complete original audio without requiring ASR.
+# 1.24.0: finalize-reading?solve=background returns after segmentation with
+#        `solving: "background"`; answer-bundle shows each 小問 as it is saved.
+#        Without the parameter the call still solves before answering. Additive.
+#        A (A)-style letter line under 問N is now that question's choice, not a
+#        separate deck problem (fewer problems for such pages).
+# 1.25.0: a background finalize-reading lists the 小問 with the configured solver
+#        from the originals (OCR segmentation is the fallback), solves only the
+#        items answer-bundle shows, and answer-bundle answers 409 "the question
+#        list is being made" until the list exists.
+# 1.26.0: /v1/settings no longer returns 500 when a provider check raises or
+#        ROKID_REAL_MODE rejects the selection: the provider entry reports
+#        ready:false with a `message`. answer-bundle names a new stop, the
+#        `chat_lost` failure ("教科のチャットへ戻れません…"): the subject's chat
+#        could not be reached, no new chat was opened, and the batch stopped.
+# 1.27.0: a background solve on chatgpt-web sends ONE message: the reply names
+#        every 小問 and answers it, and nothing is sent per 小問. answer-bundle
+#        answers 409 "the answers are being made" until that reply is in.
+# 1.28.0: GET .../pages.pdf and paste-prompt's `pages_pdf_url` are removed
+#        (outside Enterprise ChatGPT discards a PDF's images). answer-bundle
+#        names new failures: rate_limited is shown as failed; not_sent and
+#        browser_busy stay pending with "…自動で再試行します" while the server
+#        tries again. question_label is the printed number ("問1", not "問1(2)").
+#        answer-bundle restarts a reviewing session's lost background batch.
+# 1.29.0: answer-bundle names browser_blocked (another send still unconfirmed)
+#        as retrying; a retrying failure becomes `failed` with a plain reason
+#        after RESUME_LIMIT batches. Only sessions under RESUME_WINDOW_S resume.
+# 1.29.1: answer-bundle keeps a kanji-numbered 大問 ("第一問", "大問二") as its
+#        group instead of folding it into the labels under one 全体 group.
+# 1.30.0: an answer-bundle item carries the printed 解答番号 it fills
+#        ("answer_no", additive, omitted when the booklet prints none), and a
+#        番号 the one reply never answered gets its own failed item.
+# 1.31.0: authenticated glasses state carries device/session/generation/sequence
+#        so the phone can request display changes without waking a finished session.
+# 1.31.1: answer-bundle preserves meaningful braces in written sets and code.
+# 1.31.2: browser solving recognizes the operator-selected Latest/Extra High UI.
+# 1.32.0: mixed analysis stages and partial answer availability; authenticated
+#         chooser/waiting display requests preserve protected visible work.
+# 1.33.0: authenticated Work job manifests, original-image reads and result receipts.
+# 1.33.1: quality failures allow validated stop results, while answers stay gated.
+# 1.34.0: local browser Work results retain source/readability provenance, and
+#         rejected readability has a visible failure without automatic resending.
+# 1.35.0: an expired Work send may remain pending until its matching receipt
+#         is recovered; waiting does not consume the current session retry budget.
+# 1.36.0: optional native capture provenance is validated against uploaded JPEG
+#         bytes and acknowledged with the canonical PNG identity.
+# 1.37.0: explicitly identified ZSL originals require matching positive sensor timestamps.
+# 1.38.0: /capture-videos accepts sealed original-video comparison clips and their journals.
+# 1.39.0: optional capture inspection origins and authenticated diagnostic result lookups.
+# 1.39.1: source-position labels for unlabelled questions; do not invent numeric gaps.
+# 1.40.0: schema 3 for extended vector diagrams; preserve printed answer-number bounds.
+# 1.41.0: align original JPEG and complete answer budgets with the standalone client.
+# 1.42.0: optional native JPEG Work sources include explicit rotation and upright RGB evidence.
+# 1.42.1: reject nonempty answer fields that the displayed answer cannot retain.
+# 1.42.2: keep unsupported table/matrix source intact and mark it for review.
+# 1.42.3: new Work answers default to Fast without replacing sealed job settings.
+# 1.43.0: answer-bundle reports a route change as pending; ROKID_SOLVER_FALLBACKS orders booklet routes.
+# 1.44.0: answer-bundle issue for a booklet over the upload window; ROKID_CHATGPT_UPLOAD_WINDOW_FILES.
+# 1.45.0: POST /v1/route-check; /v1/settings gains `route_check` (the last result, or null).
+# 1.46.0: an answer-bundle item is needs_review, with its reason in `issue`, when two reads disagreed on it.
+# 1.47.0: capture_provenance takes the source kind `clip_frame`; POST /v1/documents/{id}/pages/{index}/clip keeps that
+#         page's clip and GET /v1/documents/{id}/clips lists them; document finalization waits up to
+#         ROKID_GATHER_WAIT_S for the clips; answer-bundle ends with one needs_review item for each recorded page whose
+#         clip was not gathered.
+# 1.48.0: an answer-bundle item is needs_review with the issue 図の形式を表示できません when a figure of a ready answer
+# could not be drawn, and 形式外の内容は表示していません when the reply carried content outside the answer format;
+# the item keeps its answer text in both cases.
+# 1.49.0: an answer bundle can hold items with empty group and label and status needs_input that name what the
+# captures leave out (a page-number gap, text cut at an image's edge, a capture Work's review could not read).
+# 1.50.0: POST /v1/route-check takes ?deep=1: the Chat route sends one small real message and collects its
+#         reply (without it the browser routes are only looked at). GET /v1/route-check/failures returns the
+#         newest snapshots a failed browser route left, and /v1/settings carries the last as `route_failure`.
+#         A route's check can report `check_failed` (the reply's count was wrong) and `model_mismatch`.
+#         The Codex CLI's row of a route check carries `usage` when its request's record tells it:
+#         `used_percent`, `window_minutes` and `resets_at` of the allowance, numbers only.
+# 1.51.0: an answer that was reached by calculation or reasoning holds its result first and then its working
+#         on lines that begin with 式： (answer text only; no field was added). A question with several answer
+#         boxes is one item whose answer names each box on a line of its own (平均：7/2).
+# 1.51.1: `question_label` of the answer bundle keeps a printed "(1)" at its end; only the "(2)", "(3)" that the
+#         server adds to a repeated number is taken off. No field changed.
+# 1.52.0: the answer bundle may end with the item `read-once` (照合なし) when one read of two answered. Without a
+#         deck and with the send gate off, the bundle's 409 says "sending is not authorized". `/v1/route-check`
+#         and `/v1/settings` carry `deep_checked_at` once a check has sent through the browser. With
+#         ROKID_UNNAMED_PAGES_NOTICE=1 (off) the bundle names captured pages no answer cites (`pages-unanswered`).
+# 1.53.0: while the second of two reads is still running the answer bundle ends with the item `read-comparing`
+#         (照合中, needs_review); a later revision carries the compared answers over the same question ids, may add
+#         a question only the second read listed, and drops that item (or ends with `read-once`). A client has
+#         to take a newer snapshot whose list of questions grew or shrank around the ones it holds (glassdoc
+#         0.44.18; an older one refuses it and is notified again every five seconds).
+# 1.54.0: /v1/settings gains `codex_update`: what the last attempt to bring the Codex CLI to its newest stable
+#         release found (result, version, from, to, step, checked_at; numbers and fixed words), or null where the
+#         host does not keep the CLI up to date by itself. A route's `usage` in `route_check` is of the window
+#         nearer its limit when the service names two.
+# 1.55.0: the answer bundle may carry the item `pages-reduced` (縮小, needs_review) before the item about the
+#         reads: the booklet was more than one request holds and no read saw every page at its own size.
+# 1.56.0: POST /v1/documents/{id}/capture-check ({"retake": [page numbers]}) and POST
+#         /v1/exam-sessions/{id}/retake. The answer bundle: no item of group `pages` but the optional
+#         `pages-unanswered`; optional top-level `comparing` (true) and `retake` (capture numbers from 1, at most
+#         100); optional item fields `other` (at most 200 characters, with needs_review) and `seen` (true). While
+#         a booklet is read again after a retake the bundle answers 409 "the answers are being made".
+# 1.57.0: the answer bundle's optional item field `uncertain` (true): the two reads of the booklet differ on this
+#         answer, or one of them alone gave it. With needs_review only.
+API_VERSION = "1.57.0"
 
 # Matching algorithm identity. Bump when thresholds or hashing change so a
 # re-index/eval is triggered. Mirrors thresholds in app/matching.py.
@@ -303,7 +675,13 @@ ANALYZER_API_VERSION = "1.0.0"
 # 1.6.0: Question gained the optional `audio_path` field, so a listening
 #        question can carry the recording itself and not only its transcript.
 #        Adapters that cannot take audio ignore it (additive/back-compat).
-SOLVER_API_VERSION = "1.7.1"
+# 1.8.0: original page images are acknowledged in ordered batches in one chat;
+#        the final message requests all answers after every source was received.
+# 1.9.0: mixed reading and listening stages share the original paper/chat
+#        identity and retain completed reading answers when audio arrives.
+# 1.10.0: optional vector styles, arcs and hatched polygons in answer diagrams.
+# 1.11.0: Solver.check() proves a route can answer now; check_sends says whether that is a real request.
+SOLVER_API_VERSION = "1.11.0"
 
 # Media-extractor plugin interface (formula/figure/graph/table).
 EXTRACTOR_API_VERSION = "1.0.0"
@@ -356,7 +734,91 @@ EXPLAINER_API_VERSION = "1.1.0"
 # Upright, magnified still review and phone-side unfold-to-chooser startup.
 # Failed CLOSED persistence keeps the answer and shows a retry notice.
 # Composition-only review and bounded clipped-shot ranking; 3s timing unchanged.
-GLASSES_VIEW_CONTRACT_VERSION = "1.17.2"
+# Local capture waits for AE convergence within the existing total deadline.
+# A local best shot OCR read nothing (or failed on) reaches the 3s review instead of a retry.
+# Only a 409 "being made" is analysis (read every 30s, display asleep); any other
+# 409 wakes and says why. A replacement deck of the same input is accepted.
+# Automatic capture rests the camera after 30s with no page registered and
+# shows "撮影を休止 / タップで再開"; the shutter tap resumes it.
+# Manual capture mode ("manual" Intent extra, persisted): no automatic burst,
+# one tap one photo, "手動撮影 / 1タップ＝1枚".
+# Local capture is a JPEG-only session with an untouched still request again:
+# the 9/23 metering stream never returned a still on the glasses (2026-09-30).
+# Capture waiting text and the aim mark clear after HudView.FADE_MILLIS.
+# No text while aiming; review is the photo cropped to the paper plus one line.
+# 1.26.0: automatic one-shot page-change capture, continuous answer reading,
+#        writing-done standby and generation-bound phone display requests.
+# 1.27.0: ordinary still review shows the photo without text; window display
+#        ownership preserves the system timeout; compact answers use fixed pages.
+# 1.28.0: five-second idle display requests, fresh wear chooser entry and
+#         mixed recording controls with staged answer revisions.
+# 1.29.0: capture preview/review occupy a shared corner viewport; answer text
+#         and the visible-acknowledged review/commit interval are preserved.
+# 1.30.0: ordinary status and chooser lines use a compact display region;
+#         full answer pages and the capture/review viewport stay unchanged.
+# 1.31.0: retain page-change preview through successful still capture and review;
+#         any native drain failure closes the camera and requires a new generation.
+# 1.32.0: preserve up to two future-page originals while reviewing; promote in
+#         order and require each candidate's fresh visible review before commit.
+# 1.33.0: a native original remains unacknowledged until its complete provenance
+#         is echoed with the server's canonical image identity.
+# 1.34.0: active local capture keeps observing pages after idle waits without a resume tap.
+# 1.35.0: opt-in ZSL evaluation preserves scene/quiet pairing and unresolved originals.
+# 1.36.0: opt-in recording evaluation retains originals and fences finalization with native capture.
+# 1.37.0: opt-in comparison transfer binds original clips to one local/device generation.
+# 1.38.0: current-run native uploads may include their pre-capture diagnostic origin.
+# 1.39.0: fence stale power generations and show bounded, identity-bound capture feedback.
+# 1.40.0: opt-in native A/B selection retains both originals and reviews the chosen image.
+# 1.41.0: bounded fine-detail page-change evidence with coherent preview registration.
+# 1.42.0: extended diagram rendering and metering fenced to the current page scene.
+# 1.43.0: sensor-time stillness, checked native exposure and bounded long-answer reading.
+# 1.43.1: keep displayed fractions atomic and hold ambiguous unsupported notation.
+# 1.43.2: preserve unsupported table blocks and whole matrix-bearing expressions.
+# 1.44.0: in ordinary reading one tap pauses and resumes the display and camera; the forward swipe
+#         takes the manual shot and the retake; a tap hides the answers while reading them.
+# 1.45.0: one rule on every screen: tap turns the display off or on, swipe selects, double tap decides.
+#         The chooser starts on the double tap; the live corner shows the paper, not the whole frame.
+# 1.46.0: the still copies the preview's auto exposure; the exposure is shortened by the camera's own
+# frame-rate range, never by hand (a hand-raised gain was colour noise beside the glasses' own camera).
+# 1.47.0: the display state follows the real display: a system wake without a gesture is noticed on resume, the
+# idle blanks the view, the waking gesture does nothing else on every screen, a tap turns a waiting screen off.
+# 1.48.0: the chooser stays 30 s (waiting screens keep 5 s); after the writing is done the waking touch counts as
+# the first of the two double taps that leave.
+# 1.49.0: with capture=clip saved, an ordinary written page is a short clip: while it is recorded a line along the
+# small window's lower edge shows how far it has come, and while waiting a mark at each corner says the paper fills
+# too little of the window (provisional); a double tap during the recording ends that clip at once and what it has
+# is the page, a tap lets it finish and then pauses. The lower margin is 125 px until one is saved. Stills are
+# unchanged and stay the default.
+# 1.50.0: a clip's frame during whose exposure no gyroscope reading arrived is not counted as still (it was
+# written as 0 px of smear; now 999, with the number of frames whose readings ended early as gyro_partial); a
+# clip's record keeps the gyroscope's readings taken while it was recorded (gyro: t_ns, x, y, z); a clip takes the
+# long exposure only once a gain was saved with long_above (0 turns it off again).
+# 1.51.0: a tap during capture clears the display in the turn it is made in and the camera stops at once
+# (a clip being recorded ends there and what it has is the page; a still lands first). Nothing is saved
+# behind a cleared display: the page in hand gets its own three-second review on return. While the display
+# is cleared a double tap only brings it back; it ends the capture only while the capture is showing.
+# 1.52.0: during capture a bar stands outside each side of the small window past which the paper runs out of
+# the camera's view, and beside the review of the page taken that way: what is printed beyond that side is
+# not in the picture. The thick frame that said "too near" (glassdoc 0.44.7) is gone: its rule did not hold.
+# 1.53.0 (glassdoc 0.44.20): the answers are shown without explanations. The certain answers come first, packed;
+# then one screen 再撮影 with the numbers of the captures to take again, when there are any; then the answers that
+# are not certain, each as ？label answer｜the other read's answer; then the answers the wearer already had
+# before pages were taken again. A question without an answer for want of material is not shown: its page is
+# among those to take again. The index row ends with … while a second read is being compared. Paging goes round:
+# past the last screen comes the first. With pages to take again a double tap on the answers takes them (the
+# capture comes back, the number above the small window is 再N, the page's own number); a second double tap before
+# any page is taken ends the writing. When the phone finds pages not whole right after the end of a capture, the
+# same numbers come up before anything is sent. A tap that clears the display during a recording drops a clip that
+# has not yet the still frames of a page; the page is recorded again on return. The display no longer lights when
+# only the reading's number becomes known behind it.
+# 1.54.0 (glassdoc 0.44.22): the answers stand in the paper's order and carry no mark. An answer the two reads do
+# not settle is not shown at all (until now it came behind the others as ？label answer｜the other read's answer);
+# its capture is on the screen 再撮影. A double tap takes those captures only on that screen; on every other screen
+# of the answers it ends the writing as it did before captures were listed. A reading in which nothing has been
+# taken is left by a double tap (not in its first second and a half), where that double tap used to do nothing.
+# Pages the phone asks for again before sending are waited for one minute without a page or a gesture; then the
+# booklet goes out as it is.
+GLASSES_VIEW_CONTRACT_VERSION = "1.54.0"
 
 # Answer-area overlay payload (box + short answer; 2D image-anchored).
 # 1.1.0: added tracking metadata (tracking/fixed_ar/anchor_hint).

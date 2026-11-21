@@ -1,0 +1,587 @@
+"""Frames of one page, each too dark to read, are placed on each other and added into a page that can be read.
+
+Why it exists (docs/hardware-measurements.md, M-24 and M-25): at the venue's light one frame's level over noise is 2.2
+to 4.5 where reading needs about 32, and it grows with the square root of the frames added. Frames of half the sensor's
+size read as well as full-size ones only when added on a finer grid at sub-pixel positions (2.3% of characters wrong
+against 21.2% without the finer grid, six reads each). Textbook phase correlation cannot place frames this noisy; a
+band-passed correlation against the sum so far can.
+
+The scenes here are generated: print-like strokes on paper. No photograph is used.
+"""
+from __future__ import annotations
+
+import shutil
+import subprocess
+import time
+
+import pytest
+
+np = pytest.importorskip("numpy")
+
+from app import gather as g  # noqa: E402
+
+PAPER = 0.6  # the paper's light, of 1
+
+
+def scene(seed=1, h=384, w=512):
+    """Paper with dark strokes 2 to 4 px wide on a 16 px pitch, softened as a lens softens them."""
+    rng = np.random.default_rng(seed)
+    image = np.full((h, w), PAPER, np.float32)
+    for y in range(8, h - 24, 16):
+        for x in range(8, w - 24, 16):
+            for _ in range(int(rng.integers(1, 4))):
+                thin, long = int(rng.integers(2, 5)), int(rng.integers(6, 13))
+                top, left = y + int(rng.integers(0, 6)), x + int(rng.integers(0, 6))
+                if rng.random() < 0.5:
+                    image[top:top + thin, left:left + long] = 0.08
+                else:
+                    image[top:top + long, left:left + thin] = 0.08
+    fy = np.fft.fftfreq(h)[:, None]
+    fx = np.fft.rfftfreq(w)[None, :]
+    soft = np.exp(-2 * (np.pi * 1.0) ** 2 * (fy ** 2 + fx ** 2))  # a blur of one pixel (sigma)
+    return np.fft.irfft2(np.fft.rfft2(image) * soft, s=image.shape).astype(np.float32)
+
+
+def moved(image, dy, dx):
+    """image(y - dy, x - dx) at sub-pixel shifts, by a phase ramp on a mirrored copy."""
+    pad = 32
+    big = np.pad(image, pad, mode="reflect")
+    fy = np.fft.fftfreq(big.shape[0])[:, None]
+    fx = np.fft.rfftfreq(big.shape[1])[None, :]
+    shifted = np.fft.irfft2(np.fft.rfft2(big) * np.exp(-2j * np.pi * (fy * dy + fx * dx)), s=big.shape)
+    return shifted[pad:-pad, pad:-pad].astype(np.float32)
+
+
+def joined(image):
+    return image.reshape(image.shape[0] // 2, 2, image.shape[1] // 2, 2).mean(axis=(1, 3))
+
+
+def frames(image, shifts, snr1, seed=2):
+    """What the camera's half-size stream gives: the scene moved, pixels joined 2x2, one frame's level over noise at a
+    sensor pixel `snr1` (2.2 was measured for 10 ms at the venue's light), nothing below black."""
+    rng = np.random.default_rng(seed)
+    sigma = PAPER / (2 * snr1)
+    return [np.maximum(joined(moved(image, dy, dx)) + rng.normal(0, sigma, (image.shape[0] // 2, image.shape[1] // 2)), 0)
+            .astype(np.float32) for dy, dx in shifts]
+
+
+def rolled(image, degrees):
+    """The scene turned about its centre, as a tilted head sees it."""
+    h, w = image.shape
+    angle = np.deg2rad(degrees)
+    yy, xx = np.mgrid[0:h, 0:w].astype(np.float32)
+    cy, cx = (h - 1) / 2, (w - 1) / 2
+    sy = cy + (yy - cy) * np.cos(angle) - (xx - cx) * np.sin(angle)
+    sx = cx + (yy - cy) * np.sin(angle) + (xx - cx) * np.cos(angle)
+    y0, x0 = np.clip(np.floor(sy).astype(int), 0, h - 2), np.clip(np.floor(sx).astype(int), 0, w - 2)
+    fy, fx = np.clip(sy - y0, 0, 1), np.clip(sx - x0, 0, 1)
+    return ((1 - fy) * (1 - fx) * image[y0, x0] + (1 - fy) * fx * image[y0, x0 + 1]
+            + fy * (1 - fx) * image[y0 + 1, x0] + fy * fx * image[y0 + 1, x0 + 1]).astype(np.float32)
+
+
+def alike(a, b):
+    inner = (slice(24, -24), slice(24, -24))
+    return float(np.corrcoef(a[inner].ravel(), b[inner].ravel())[0, 1])
+
+
+def settled(image, truth):
+    """`alike` once the truth is moved to where the image lies: a page gathered a fraction of a pixel off as a whole
+    (it lies where its frames lay on average, not where the first one lay) is as good a page."""
+    dy, dx, _ = g.shift_of(image, truth, reach=4.0)
+    return alike(image, moved(truth, dy, dx))
+
+
+def page_of_print(seed=5, h=172, w=512):
+    """A part of a page as the sensor sees vertical print lying on its side: lines every 16 px with blank paper between,
+    a character every 8 px along a line, lines of unequal length, a blank here and there. Regular, as print is; a
+    correlation surface repeats that as side peaks. Each character is a few strokes in its 6 px cell."""
+    rng = np.random.default_rng(seed)
+    image = np.full((h, w), PAPER, np.float32)
+    for y in range(6, h - 10, 16):
+        for x in range(4, int((w - 8) * rng.uniform(0.6, 1.0)), 8):
+            if rng.random() < 0.15:
+                continue
+            for _ in range(int(rng.integers(2, 5))):
+                a, b = int(rng.integers(0, 5)), int(rng.integers(0, 5))
+                if rng.random() < 0.5:
+                    image[y + a:y + a + 2, x:x + 6] = 0.08
+                else:
+                    image[y:y + 6, x + b:x + b + 2] = 0.08
+    fy = np.fft.fftfreq(h)[:, None]
+    fx = np.fft.rfftfreq(w)[None, :]
+    soft = np.exp(-2 * (np.pi * 1.0) ** 2 * (fy ** 2 + fx ** 2))
+    return np.fft.irfft2(np.fft.rfft2(image) * soft, s=image.shape).astype(np.float32)
+
+
+def taken(image, shifts, snr1, seed=3):
+    """Frames at the scene's own size: moved, one frame's level over noise `snr1`, nothing below black."""
+    rng = np.random.default_rng(seed)
+    return [np.maximum(moved(image, dy, dx) + rng.normal(0, PAPER / snr1, image.shape), 0).astype(np.float32) for dy, dx in shifts]
+
+
+def test_shift_of_finds_a_known_shift_under_the_venue_noise():
+    s = scene()
+    reference = sum(frames(s, [(0, 0)] * 8, 2.2)) / 8
+    dy, dx, strength = g.shift_of(frames(s, [(3.0, -5.0)], 2.2, seed=7)[0], reference, around=(1.0, -2.0), reach=4.0)
+    assert abs(2 * dy - 3.0) <= 0.5 and abs(2 * dx + 5.0) <= 0.5
+    assert strength > 5
+
+
+def test_gathered_page_keeps_detail_that_plain_averaging_loses():
+    s = scene()
+    walk = np.cumsum(np.random.default_rng(3).normal(0, 0.8, (120, 2)), axis=0)
+    walk -= walk[0]
+    fs = frames(s, walk, 2.2)
+    result = g.gather(fs)
+    plain = np.repeat(np.repeat(sum(fs) / len(fs), 2, 0), 2, 1)
+    assert result.placed and result.used >= 110 and result.total == 120 and result.selection == "none"
+    assert result.image.shape == s.shape
+    assert alike(result.image, s) > 0.9
+    assert alike(result.image, s) > alike(plain, s) + 0.02
+
+
+def test_level_over_noise_grows_with_the_frames_added():
+    s = scene()
+    few = g.gather(frames(s, [(0, 0)] * 16, 2.2))
+    many = g.gather(frames(s, [(0, 0)] * 64, 2.2))
+    assert 1.6 < many.level_over_noise / few.level_over_noise < 2.4  # the square root of four times the frames
+
+
+def test_smeared_frames_are_left_out():
+    result = g.gather(frames(scene(), [(0, 0)] * 40, 2.2), smear=[0.5] * 20 + [6.0] * 20)
+    assert (result.used, result.total, result.selection) == (20, 40, "motion")
+
+
+def test_a_changed_scene_is_not_added():
+    a, b = scene(1), scene(9)
+    mixed = g.gather(frames(a, [(0, 0)] * 30, 2.2) + frames(b, [(0, 0)] * 10, 2.2, seed=5))
+    assert mixed.placed and mixed.used <= 32
+    assert alike(mixed.image, a) > 0.9
+    lost = g.gather(frames(a, [(0, 0)] * 6, 2.2) + frames(b, [(0, 0)] * 30, 2.2, seed=5))
+    assert not lost.placed
+
+
+def test_a_page_begun_on_another_view_is_begun_again_where_the_still_frames_are():
+    """The operator's trial of 2026-11-17 (M-44 (15)). A clip's first still frames showed one part of a large sheet;
+    then the paper was moved (the gyroscope saw no turn) and the other 58 still frames showed a part 640 px away. The
+    page stayed where the first frames had put it, none of the 58 could be laid on it, and the clip was "not placed":
+    its page went to the model as one dark frame. The record says how many still frames are still to come; a page
+    that holds a small share of them is begun again at the frame that would not go on it."""
+    a, b = scene(1), scene(9)
+    fs = frames(a, [(0, 0)] * 3, 2.2) + frames(b, [(0, 0)] * 40, 2.2, seed=5)
+    result = g.gather(fs, smear=[0.5] * 43)
+    assert result.placed and result.used >= 38, (result.used, result.total)
+    assert alike(result.image, b) > 0.9
+
+
+def test_another_view_at_the_end_of_a_clip_does_not_take_the_page():
+    a, b = scene(1), scene(9)
+    fs = frames(a, [(0, 0)] * 30, 2.2) + frames(b, [(0, 0)] * 10, 2.2, seed=5)
+    result = g.gather(fs, smear=[0.5] * 40)
+    assert result.placed and 28 <= result.used <= 32, (result.used, result.total)
+    assert alike(result.image, a) > 0.9
+
+
+def test_a_head_that_looked_away_and_came_back_keeps_its_page():
+    a, b = scene(1), scene(9)
+    fs = frames(a, [(0, 0)] * 10, 2.2) + frames(b, [(0, 0)] * 10, 2.2, seed=5) + frames(a, [(0, 0)] * 20, 2.2, seed=6)
+    result = g.gather(fs, smear=[0.5] * 40)
+    assert result.placed and result.used >= 28, (result.used, result.total)
+    assert alike(result.image, a) > 0.9
+
+
+def test_no_usable_frame_is_an_answer_not_an_error():
+    result = g.gather(frames(scene(), [(0, 0)] * 5, 2.2), smear=[9.0] * 5)
+    assert (result.used, result.total, result.placed, result.level_over_noise) == (0, 5, False, 0.0)
+
+
+def test_bright_frames_stay_in_range():
+    result = g.gather([np.full((96, 128), 0.98, np.float32) for _ in range(12)])
+    assert np.isfinite(result.image).all()
+    assert 0.9 < float(result.image.mean()) < 1.05
+
+
+def test_a_tilted_head_is_followed_part_by_part():
+    s = scene(h=576, w=768)
+    angles = np.random.default_rng(4).normal(0, 0.25, 60)
+    angles[0] = 0.0  # the first frame is where the page is put
+    fs = [frames(rolled(s, angle), [(0, 0)], 2.2, seed=10 + k)[0] for k, angle in enumerate(angles)]
+    whole = g.gather(fs, parts=1)
+    fitted = g.gather(fs, parts=3)
+    assert fitted.placed and fitted.used >= 55
+    assert alike(fitted.image, s) > alike(whole.image, s) + 0.01
+
+
+def seen(image, dy, dx, h=384, w=512):
+    """The part of a larger scene that a camera turned by (dy, dx) scene pixels sees: scene(y - dy, x - dx)."""
+    top, left = (image.shape[0] - h) // 2, (image.shape[1] - w) // 2
+    whole_y, whole_x = int(np.floor(dy)), int(np.floor(dx))
+    fine = moved(image, dy - whole_y, dx - whole_x)
+    return fine[top - whole_y:top - whole_y + h, left - whole_x:left - whole_x + w]
+
+
+def test_a_worn_head_is_followed_through_the_frames_that_are_not_added():
+    """Worn for the first time, 2026-11-16 (M-31). A clip took 5 to 10 s, and between two runs of still frames the head
+    turned and the picture moved 46 to 301 px. A frame was looked for within 16 px of the last one added, so every run
+    after the first was lost: three clips of seven were not placed, the others used half their still frames. Each
+    frame was a strong match for the frame just before it, added or not."""
+    s = scene(seed=3, h=640, w=832)
+    rng = np.random.default_rng(8)
+    path, smear, at = [], [], np.zeros(2)
+    for run in range(4):
+        for _ in range(15):  # still: a fraction of a pixel a frame
+            at = at + rng.normal(0, 0.3, 2)
+            path.append(at.copy())
+            smear.append(0.8)
+        if run < 3:
+            way = rng.normal(0, 1, 2)
+            way /= np.hypot(*way)
+            for _ in range(10):  # turning: 5 scene px a frame, 50 before the head is still again
+                at = at + 5 * way
+                path.append(at.copy())
+                smear.append(5.0)
+    noise = np.random.default_rng(9)
+    sigma = PAPER / (2 * 2.2)
+    fs = [np.maximum(joined(seen(s, dy, dx)) + noise.normal(0, sigma, (192, 256)), 0).astype(np.float32) for dy, dx in path]
+    result = g.gather(fs, smear=smear)
+    assert result.placed and result.used >= 56, (result.used, result.total)  # sixty still frames in four runs
+    # The later runs add to the page: with them it is nearer the scene than the first run alone gives (0.963 against
+    # 0.945). Added at one shift a frame it was 0.979: a frame laid by a map goes pixel by pixel into the nearest cell,
+    # not shared between four, and the cells are noisier for it; joined 2x2 the two ways read 0.988 and 0.991.
+    first = g.gather(fs[:15], smear=smear[:15])
+    assert settled(result.image, seen(s, 0, 0)) > settled(first.image, seen(s, 0, 0)) + 0.01
+
+
+def looked_at(image, dy, dx, degrees, lean, size=1.0, h=768, w=1024):
+    """What a camera sees of a larger scene after the head turned: the picture moved by (dy, dx) scene pixels, turned
+    by `degrees` about its centre, seen `lean` more from the side (the far edge smaller: a homography), and `size`
+    times as large as at first (0.9: from further away)."""
+    angle = np.deg2rad(degrees)
+    yy, xx = np.mgrid[0:h, 0:w].astype(np.float64)
+    y, x = yy - (h - 1) / 2, xx - (w - 1) / 2
+    far = (1 + lean * x / (w / 2)) * size
+    ty, tx = (y * np.cos(angle) - x * np.sin(angle)) / far, (y * np.sin(angle) + x * np.cos(angle)) / far
+    sy, sx = (image.shape[0] - 1) / 2 + ty - dy, (image.shape[1] - 1) / 2 + tx - dx
+    y0, x0 = np.clip(np.floor(sy).astype(int), 0, image.shape[0] - 2), np.clip(np.floor(sx).astype(int), 0, image.shape[1] - 2)
+    fy, fx = np.clip(sy - y0, 0, 1), np.clip(sx - x0, 0, 1)
+    return ((1 - fy) * (1 - fx) * image[y0, x0] + (1 - fy) * fx * image[y0, x0 + 1]
+            + fy * (1 - fx) * image[y0 + 1, x0] + fy * fx * image[y0 + 1, x0 + 1]).astype(np.float32)
+
+
+def test_a_head_that_turned_is_laid_on_the_page_across_the_whole_field():
+    """Worn for the first time, 2026-11-16 (M-31). Between two still runs the picture had not only moved: against a
+    move of 44 px its edges lay another 15 to 19 px off, because the head had also tilted about a degree and saw the
+    page from another side. Added at one shift, the page was sharp in the middle and double towards its edges."""
+    s = scene(seed=3, h=1024, w=1280)
+    rng = np.random.default_rng(8)
+    stops = [(0.0, 0.0, 0.0, 0.0), (-26.0, 14.0, 1.2, 0.012), (18.0, -34.0, -0.9, -0.010), (30.0, 22.0, 1.5, 0.008)]
+    poses, smear = [], []
+    for run, stop in enumerate(stops):
+        for _ in range(12):  # still: a fraction of a pixel a frame
+            poses.append((stop[0] + rng.normal(0, 0.3), stop[1] + rng.normal(0, 0.3), stop[2], stop[3]))
+            smear.append(0.8)
+        if run + 1 < len(stops):
+            for step in range(1, 9):  # turning to the next stop
+                poses.append(tuple(a + (b - a) * step / 9 for a, b in zip(stop, stops[run + 1])))
+                smear.append(5.0)
+    noise = np.random.default_rng(9)
+    sigma = PAPER / (2 * 2.2)
+    fs = [np.maximum(joined(looked_at(s, *pose)) + noise.normal(0, sigma, (384, 512)), 0).astype(np.float32) for pose in poses]
+    truth = looked_at(s, 0, 0, 0, 0)
+    result = g.gather(fs, smear=smear)
+    assert result.placed and result.used >= 44, (result.used, result.total)  # forty-eight still frames in four runs
+    first = g.gather(fs[:12], smear=smear[:12])
+    corner = (slice(40, 296), slice(40, 296))  # a corner of the page, where a turn moves the picture most
+    assert alike(result.image[corner], truth[corner]) > alike(first.image[corner], truth[corner]) + 0.01
+    assert alike(result.image, truth) > alike(first.image, truth) + 0.01
+
+
+def test_a_head_that_came_back_further_away_is_still_laid_on_the_page():
+    """M-31: after looking away the head came back a little further from the page, the picture an eighth smaller in
+    area. No single shift made such a frame match the page well enough to be taken for it (7.1 to 8.2 where 8 is asked),
+    and a run of twenty still frames was lost. Where the picture is was known all along, from frame to frame.
+    Regular print, as a page has it: scattered strokes are found at one shift even so."""
+    s = page_of_print(seed=5, h=1024, w=1280)
+    rng = np.random.default_rng(8)
+    stops = [(0.0, 0.0, 0.0, 0.0, 1.0), (22.0, -16.0, 1.0, 0.09, 0.93)]  # the lean and the size of M-31
+    poses, smear = [], []
+    for run, stop in enumerate(stops):
+        for _ in range(14):
+            poses.append((stop[0] + rng.normal(0, 0.3), stop[1] + rng.normal(0, 0.3), *stop[2:]))
+            smear.append(0.8)
+        if run + 1 < len(stops):
+            for step in range(1, 13):  # moving to the next stop, a little of the way each frame
+                poses.append(tuple(a + (b - a) * step / 13 for a, b in zip(stop, stops[run + 1])))
+                smear.append(5.0)
+    noise = np.random.default_rng(9)
+    sigma = PAPER / (2 * 2.2)
+    fs = [np.maximum(joined(looked_at(s, *pose)) + noise.normal(0, sigma, (384, 512)), 0).astype(np.float32) for pose in poses]
+    truth = looked_at(s, 0, 0, 0, 0)
+    result = g.gather(fs, smear=smear)
+    assert result.placed and result.used >= 26, (result.used, result.total)  # twenty-eight still frames in two runs
+    first = g.gather(fs[:14], smear=smear[:14])
+    # and they add to the page (0.918 against 0.909; frames laid by a map go into single cells, which are noisier)
+    assert alike(result.image, truth) > alike(first.image, truth) + 0.005
+
+
+def clip(tmp_path, fs, name="c.mp4", gap_after=None):
+    """The frames as a video a camera would have written: 8 bits through the display curve, H.264. gap_after: the
+    frame after which five frame times pass with no frame, as when the camera drops frames."""
+    ffmpeg = shutil.which("ffmpeg")
+    if not ffmpeg:
+        pytest.skip("ffmpeg is not installed")
+    h, w = fs[0].shape
+    raw = b"".join((np.clip(np.where(f <= 0.0031308, f * 12.92, 1.055 * np.maximum(f, 1e-9) ** (1 / 2.4) - 0.055), 0, 1) * 255 + 0.5)
+                   .astype(np.uint8).tobytes() for f in fs)
+    target = tmp_path / name
+    timing = [] if gap_after is None else ["-vf", f"setpts='if(gt(N,{gap_after}),PTS+5/30/TB,PTS)'", "-fps_mode", "passthrough"]
+    subprocess.run([ffmpeg, "-v", "error", "-y", "-f", "rawvideo", "-pix_fmt", "gray", "-s", f"{w}x{h}", "-r", "30", "-i", "-",
+                    *timing, "-c:v", "libx264", "-crf", "12", "-pix_fmt", "yuv420p", str(target)], input=raw, check=True)
+    return target
+
+
+def test_a_clip_round_trips_into_a_page(tmp_path):
+    s = scene()
+    result = g.gather_clip(clip(tmp_path, frames(s, [(0, 0)] * 40, 4.0)))
+    assert result.placed and result.total == 40 - g.SETTLE and result.selection == "none"
+    assert alike(result.image, s) > 0.85
+
+
+def test_a_record_of_another_length_is_not_used(tmp_path):
+    path = clip(tmp_path, frames(scene(), [(0, 0)] * 20, 4.0))
+    ignored = g.gather_clip(path, {"frames": [{"smear_px": 9.0}] * 7})
+    assert ignored.selection == "none" and ignored.used >= 12
+    applied = g.gather_clip(path, {"frames": [{"smear_px": 0.5}] * 10 + [{"smear_px": 9.0}] * 10})
+    assert (applied.selection, applied.used, applied.total) == ("motion", 10 - g.SETTLE, 20 - g.SETTLE)
+
+
+def test_a_missing_ffmpeg_and_a_broken_clip_say_why(tmp_path):
+    with pytest.raises(g.GatherError, match="ffmpeg"):
+        list(g.read_clip(tmp_path / "c.mp4", ffmpeg=str(tmp_path / "no-such-binary")))
+    if not shutil.which("ffmpeg"):
+        pytest.skip("ffmpeg is not installed")
+    (tmp_path / "bad.mp4").write_bytes(b"not a video")
+    with pytest.raises(g.GatherError):
+        list(g.read_clip(tmp_path / "bad.mp4"))
+
+
+def test_the_command_writes_the_page_and_reports_it(tmp_path, capsys):
+    path = clip(tmp_path, frames(scene(), [(0, 0)] * 12, 4.0))
+    out = tmp_path / "page.png"
+    assert g.main([str(path), "--out", str(out)]) == 0
+    report = __import__("json").loads(capsys.readouterr().out)
+    assert report["placed"] is True and report["used"] == 12 - g.SETTLE and report["total"] == 12 - g.SETTLE and report["seconds"] >= 0
+    from PIL import Image
+    with Image.open(out) as page:
+        assert page.size == (512, 384) and page.mode in ("I;16", "I")
+
+
+# Found by the review of the first version: each failed before its fix.
+
+
+def test_frames_too_dark_to_place_are_not_called_placed():
+    rng = np.random.default_rng(5)
+    noise = g.gather([np.maximum(rng.normal(0.1, 0.05, (192, 256)), 0).astype(np.float32) for _ in range(40)])
+    assert not noise.placed and noise.used <= 2
+    dark = g.gather(frames(scene(), [(0, 0)] * 60, 0.1))
+    assert not dark.placed
+
+
+def test_a_settling_start_does_not_fill_the_edge_from_the_far_edge():
+    s = scene()
+    settling = [(18.0 - 3.6 * k, 0.0) for k in range(5)] + [(0.0, 0.0)] * 35  # the view moves 18 px while the first frames are taken
+    result = g.gather(frames(s, settling, 8.0))
+    truth = moved(s, 18.0, 0.0)  # the page is put where the first frame is
+    edge = (slice(0, 8), slice(24, -24))  # rows only the first frames saw
+    assert result.placed
+    assert float(np.corrcoef(result.image[edge].ravel(), truth[edge].ravel())[0, 1]) > 0.75
+
+
+def test_a_gap_in_the_clip_is_not_filled_with_copies(tmp_path):
+    path = clip(tmp_path, frames(scene(), [(0, 0)] * 30, 4.0), gap_after=15)
+    assert len(list(g.read_clip(path))) == 30
+
+
+def test_a_clip_whose_frames_cannot_all_be_decoded_is_refused_at_once_and_says_so(tmp_path, monkeypatch):
+    """2026-11-18, one desk clip of forty: the file held 64 of the 66 frames the glasses' encoder had taken (the second
+    and third were missing), and the frames behind them could not be decoded up to the next key frame. The decoder's
+    complaints were never read, so on Windows it stood still on its full pipe and the clip failed after 30 s as "timed
+    out"; where the pipe is larger the frames that did decode would have been gathered, each paired with another
+    frame's entry of the record."""
+    ffmpeg = shutil.which("ffmpeg")
+    if not ffmpeg or b"libx265" not in subprocess.run([ffmpeg, "-hide_banner", "-encoders"], capture_output=True).stdout:
+        pytest.skip("ffmpeg with libx265 is not installed")
+    whole = clip(tmp_path, frames(scene(), [(0, 0)] * 60, 4.0))
+    one_key = tmp_path / "hevc.mp4"
+    subprocess.run([ffmpeg, "-v", "error", "-y", "-i", str(whole), "-c:v", "libx265", "-x265-params",
+                    "log-level=error:keyint=600:min-keyint=600:scenecut=0:bframes=0", str(one_key)], check=True)
+    lost = tmp_path / "lost.mp4"
+    subprocess.run([ffmpeg, "-v", "error", "-y", "-i", str(one_key), "-c", "copy", "-bsf:v", r"noise=drop=between(n\,1\,2)",
+                    str(lost)], check=True)
+    monkeypatch.setattr(g, "DECODE_SECONDS", 8.0)
+    started = time.monotonic()
+    with pytest.raises(g.GatherError, match=r"decoded \d+ of the 58 frames"):
+        g.gather_clip(lost, {"frames": [{"smear_px": 0.5}] * 60})
+    assert time.monotonic() - started < 8.0, "the decoder's complaints must not hold it up until its time runs out"
+
+
+def test_a_slow_reader_is_not_mistaken_for_a_stuck_decoder(tmp_path, monkeypatch):
+    path = clip(tmp_path, frames(scene(), [(0, 0)] * 20, 4.0))
+    monkeypatch.setattr(g, "DECODE_SECONDS", 1.0)
+    count = 0
+    for _ in g.read_clip(path):
+        time.sleep(0.15)
+        count += 1
+    assert count == 20
+
+
+def test_the_first_frames_of_a_clip_do_not_set_the_page(tmp_path):
+    s = scene()
+    fs = frames(s, [(0, 0)] * 30, 4.0)
+    dim_start = [frame * 0.2 for frame in fs[:3]] + fs[3:]  # the glasses' first three frames are darker than asked
+    result = g.gather_clip(clip(tmp_path, dim_start))
+    assert result.total == 30 - g.SETTLE and result.used == 30 - g.SETTLE
+    assert 0.8 < float(np.percentile(result.image, 90)) / PAPER < 1.2
+
+
+def test_a_record_a_few_frames_short_of_the_clip_is_applied(tmp_path):
+    path = clip(tmp_path, frames(scene(), [(0, 0)] * 20, 4.0))
+    record = {"frames": [{"smear_px": 0.5}] * 12 + [{"smear_px": 9.0}] * 6}  # 18 entries for 20 frames: the glasses log 2 to 3 fewer
+    result = g.gather_clip(path, record)
+    assert (result.selection, result.used, result.total) == ("motion", 12 - g.SETTLE, 20 - g.SETTLE)
+
+
+def test_only_the_first_frames_asked_for_are_used(tmp_path):
+    path = clip(tmp_path, frames(scene(), [(0, 0)] * 40, 4.0))
+    short = g.gather_clip(path, limit=10)
+    assert (short.used, short.total) == (10, 10)
+    record = {"frames": [{"smear_px": 0.5}] * 10 + [{"smear_px": 9.0}] * 30}
+    assert g.gather_clip(path, record, limit=20).used == 10 - g.SETTLE  # frames 6 to 9 pass; 10 to 25 are smeared
+    long = g.gather_clip(path)
+    assert long.level_over_noise > short.level_over_noise
+
+
+def test_a_page_of_regular_print_is_placed():
+    # Found on the first real page (2026-11-15): frames placed within half a pixel were dropped, 118 of 208, because the
+    # peak was judged against a surface full of the print's own side peaks, and stayed under the floor however good the light.
+    sway = [(0.3 * np.sin(k / 5), 0.4 * np.cos(k / 7)) for k in range(60)]
+    result = g.gather(taken(page_of_print(), sway, 4.5))
+    assert (result.used, result.total, result.placed) == (60, 60, True)
+
+
+def test_noise_is_not_placed_on_a_page_of_print():
+    rng = np.random.default_rng(8)
+    page = taken(page_of_print(), [(0, 0)] * 30, 4.5)
+    noise = [np.maximum(rng.normal(PAPER, PAPER / 4.5, page[0].shape), 0).astype(np.float32) for _ in range(120)]
+    assert g.gather(page + noise).used <= 31
+
+
+
+# Gathering made quicker (2026-11-18): the same page, bit for bit, in less time. Each of these pins one of the shorter
+# ways to what the longer way gave.
+
+
+def test_frames_that_cannot_change_the_page_are_not_worked_on(monkeypatch):
+    """A restless clip: smeared frames before the first still one, after the last, and while the picture is no longer
+    followed. Each cost a transform and a correlation, and nothing of that reached the page."""
+    still = frames(scene(), [(0, 0)] * 24, 2.2)
+    rng = np.random.default_rng(5)  # nothing of the page in view: the frame before is not found in the first of them
+    lost = [np.maximum(rng.normal(PAPER, PAPER / 4.4, (192, 256)), 0).astype(np.float32) for _ in range(6)]
+    restless = lost[:4] + still[:12] + lost + still[12:] + lost[:5]
+    smear = [9.0] * 4 + [0.5] * 12 + [9.0] * 6 + [0.5] * 12 + [9.0] * 5
+    spare = still[:12] + lost[:1] + still[12:]  # the same clip without the frames that cannot matter
+    counted = []
+    whole = g._spectrum
+    monkeypatch.setattr(g, "_spectrum", lambda image: counted.append(image.shape) or whole(image))
+    long = g.gather(restless, smear=smear)
+    worked = len(counted)
+    short = g.gather(spare, smear=[0.5] * 12 + [9.0] + [0.5] * 12)
+    assert (long.used, long.total, short.total) == (short.used, 39, 25) and long.used >= 22
+    assert np.array_equal(long.image, short.image) and long.level_over_noise == short.level_over_noise
+    assert worked == len(counted) - worked, "the frames that cannot matter were transformed all the same"
+
+
+@pytest.mark.parametrize("grid", [2, 3])
+def test_a_frame_laid_by_a_map_goes_into_the_cells_its_pixels_fall_in(monkeypatch, grid):
+    """Pixel by pixel: each into the cell nearest to it, the later one alone where two fall into one cell, none
+    where the pixel lies off the page. The same for the page's whole pixels, which place the next frames."""
+    h, w = 24, 32
+    monkeypatch.setattr(g, "AT_ONCE", 5 * w)  # worked out five rows at a time; the last band is a short one
+    rng = np.random.default_rng(6)
+    unit = max(h, w) / 2
+    y = ((np.arange(h) - (h - 1) / 2) / unit).astype(np.float32)[:, None]
+    x = ((np.arange(w) - (w - 1) / 2) / unit).astype(np.float32)[None, :]
+    maps = [np.array([[1.0, -0.02, 3.3 / unit], [0.02, 1.0, -2.6 / unit], [0.01, -0.02, 1.0]]),  # moved, turned, leaning
+            np.array([[1.0, 0.0, 40.0 / unit], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]]),  # wholly off the page
+            np.array([[2.3, 0.0, 0.0], [0.0, 2.3, 0.0], [0.0, 0.0, 1.0]])]  # seen at under half its size
+    planes, room = g._Planes((h, w), grid), g._Room((h, w), grid)
+    sums, weights = np.zeros((2, grid, grid, h, w), np.float32), np.zeros((2, grid, grid, h, w), np.float32)
+    showed = []
+    for number, m in enumerate(maps * 2):
+        frame = rng.random((h, w), dtype=np.float32)
+        row, column = g._through(np.linalg.inv(m), y, x, unit, ((h - 1) / 2, (w - 1) / 2))  # where each pixel lies on the page
+        cell_y = np.rint(grid * row + (grid - 1) / 2).astype(np.int64)
+        cell_x = np.rint(grid * column + (grid - 1) / 2).astype(np.int64)
+        latest = {(cy, cx): frame[at] for at, cy, cx in zip(np.ndindex(h, w), cell_y.ravel(), cell_x.ravel())
+                  if 0 <= cy < grid * h and 0 <= cx < grid * w}
+        for (cy, cx), value in latest.items():
+            sums[number % 2, cy % grid, cx % grid, cy // grid, cx // grid] += value
+            weights[number % 2, cy % grid, cx % grid, cy // grid, cx // grid] += 1
+        light, marks = np.zeros((h, w), np.float32), np.zeros((h, w), np.uint16)
+        for at, py, px in zip(np.ndindex(h, w), np.rint(row).astype(np.int64).ravel(), np.rint(column).astype(np.int64).ravel()):
+            if 0 <= py < h and 0 <= px < w:
+                light[py, px], marks[py, px] = frame[at], 1
+        planes.lay(number % 2, frame, m, (h, w), room)
+        seen, marked = room.seen(frame)
+        assert np.array_equal(seen, light) and np.array_equal(marked, marks)
+        showed.append(int(marks.sum()))
+        for k in (2, 3):  # how much of each joined cell was seen: the mean of ones and zeros
+            share = g._share(marked, k)
+            assert share.dtype == np.float32 and np.array_equal(share, g._joined(marks.astype(np.float32), k))
+            assert np.array_equal(g._share(marked > 0, k), share)
+    assert showed[0] > 600 and showed[1] == 0 and 100 < showed[2] < 200  # most of the page, none of it, a part twice over
+    assert weights.sum() > h * w and np.array_equal(planes.sums, sums) and np.array_equal(planes.weights, weights)
+
+
+def test_the_peak_is_the_one_the_whole_surface_shows():
+    """The peak is looked for in the rows and columns the reach touches, not on the whole surface: the same place,
+    also where the reach wraps round the edges, and the same strength."""
+    def the_long_way(cross, shape, around, reach, own):
+        h, w = shape
+        surface = np.fft.irfft2(cross, s=shape)
+        yy = (np.arange(h) - around[0] + h / 2) % h - h / 2
+        xx = (np.arange(w) - around[1] + w / 2) % w - w / 2
+        limited = np.where(yy[:, None] ** 2 + xx[None, :] ** 2 <= reach ** 2, surface, -np.inf)
+        py, px = np.unravel_index(int(np.argmax(limited)), limited.shape)
+
+        def finer(minus, mid, plus):
+            bend = minus - 2 * mid + plus
+            return 0.0 if bend >= 0 else float(np.clip(0.5 * (minus - plus) / bend, -0.5, 0.5))
+
+        dy = py + finer(surface[(py - 1) % h, px], surface[py, px], surface[(py + 1) % h, px])
+        dx = px + finer(surface[py, (px - 1) % w], surface[py, px], surface[py, (px + 1) % w])
+        top = float(surface[py, px])
+        if own is not None and own[0, 0] > 0:
+            surface = surface - (top / float(own[0, 0])) * np.roll(own, (py, px), (0, 1))
+        spread = float(surface.std())
+        return float((dy + h / 2) % h - h / 2), float((dx + w / 2) % w - w / 2), top / spread if spread > 0 else 0.0
+
+    reference = taken(page_of_print(h=96, w=128), [(0, 0)], 4.5)[0]
+    side = g._reference_side(reference)
+    own = g._own(reference, side)
+    for number, (around, reach) in enumerate([((0.0, 0.0), 4.0), ((0.0, 0.0), 21.3), ((-47.0, 63.5), 6.0), ((30.2, -70.9), 16.0),
+                                              ((95.0, 127.0), 2.0), ((3.0, -2.0), 0.3), ((0.0, 0.0), 500.0)]):
+        cross = g._spectrum(taken(page_of_print(h=96, w=128), [(1.3 * number, -2.1 * number)], 4.5, seed=number)[0]) * side
+        for pattern in (own, None):
+            assert g._peak(cross, (96, 128), around, reach, pattern) == the_long_way(cross, (96, 128), around, reach, pattern)
+
+
+def test_a_clip_can_be_read_into_one_array(tmp_path):
+    path = clip(tmp_path, frames(scene(), [(0.3 * k, 0) for k in range(8)], 4.0))
+    apart = list(g.read_clip(path))
+    assert len({id(frame) for frame in apart}) == 8 and not np.array_equal(apart[0], apart[1])
+    arrays = set()
+    for frame, kept in zip(g.read_clip(path, reuse=True), apart, strict=True):
+        assert frame.dtype == np.float32 and np.array_equal(frame, kept)
+        arrays.add(id(frame))
+    assert len(arrays) == 1
